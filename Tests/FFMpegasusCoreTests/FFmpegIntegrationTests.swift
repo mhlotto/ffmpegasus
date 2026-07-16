@@ -596,6 +596,64 @@ final class FFmpegIntegrationTests: XCTestCase {
         )
     }
 
+    func testOptionalFFmpegSyntheticFrameExport() async throws {
+        let ffmpegPath = "/opt/homebrew/bin/ffmpeg"
+        guard FileManager.default.isExecutableFile(atPath: ffmpegPath) else {
+            throw XCTSkip("FFmpeg is not available at \(ffmpegPath)")
+        }
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let input = directory.appendingPathComponent("input video.mp4")
+        let pngStart = directory.appendingPathComponent("frame-start.png")
+        let pngLater = directory.appendingPathComponent("frame-later.png")
+        let jpegNearEnd = directory.appendingPathComponent("frame-end.jpg")
+        let service = VideoEditingService()
+
+        let generate = try await ProcessRunner().run(
+            executablePath: ffmpegPath,
+            arguments: [
+                "-y", "-nostdin",
+                "-f", "lavfi",
+                "-i", "testsrc2=size=160x120:rate=10:duration=3.5",
+                "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
+                input.path
+            ]
+        )
+        XCTAssertEqual(generate.exitCode, 0, generate.stderrText)
+
+        let startRequest = try frameExportRequest(input: input, output: pngStart, timestamp: 0, format: .png)
+        let laterRequest = try frameExportRequest(input: input, output: pngLater, timestamp: 1.25, format: .png)
+        let jpegRequest = try frameExportRequest(input: input, output: jpegNearEnd, timestamp: 2.75, format: .jpeg)
+
+        let startCommand = try service.frameExportCommand(ffmpegPath: ffmpegPath, request: startRequest)
+        XCTAssertEqual(startCommand.arguments.commandValue(after: "-i"), input.path)
+        XCTAssertGreaterThan(
+            try XCTUnwrap(startCommand.arguments.firstIndex(of: "-ss")),
+            try XCTUnwrap(startCommand.arguments.firstIndex(of: "-i"))
+        )
+
+        for (request, command) in [
+            (startRequest, startCommand),
+            (laterRequest, try service.frameExportCommand(ffmpegPath: ffmpegPath, request: laterRequest)),
+            (jpegRequest, try service.frameExportCommand(ffmpegPath: ffmpegPath, request: jpegRequest))
+        ] {
+            let result = try await ProcessRunner().run(executablePath: command.executablePath, arguments: command.arguments)
+            XCTAssertEqual(result.exitCode, 0, result.stderrText)
+            let info = try FrameExportOutputValidator.verify(imageURL: request.outputURL, request: request)
+            XCTAssertEqual(info.dimensions, VideoDimensions(width: 160, height: 120))
+        }
+
+        XCTAssertNotEqual(try Data(contentsOf: pngStart), try Data(contentsOf: pngLater))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted(), [
+            "frame-end.jpg",
+            "frame-later.png",
+            "frame-start.png",
+            "input video.mp4"
+        ])
+    }
+
     private func transformRequest(
         input: URL,
         output: URL,
@@ -687,6 +745,25 @@ final class FFmpegIntegrationTests: XCTestCase {
         XCTAssertEqual(metadata.videoCodec, "h264")
         XCTAssertEqual(metadata.audioCodec != nil, request.keepsAudio)
         XCTAssertNoThrow(try VideoSpeedOutputValidator.verify(metadata: metadata, request: request))
+    }
+
+    private func frameExportRequest(
+        input: URL,
+        output: URL,
+        timestamp: TimeInterval,
+        format: FrameImageFormat
+    ) throws -> FrameExportRequest {
+        FrameExportRequest(
+            inputURL: input,
+            outputURL: output,
+            timestampSeconds: timestamp,
+            sourceDuration: 3.5,
+            sourceDimensions: VideoDimensions(width: 160, height: 120),
+            sourceRotationDegrees: nil,
+            hasVideoStream: true,
+            format: format,
+            jpegQuality: format == .jpeg ? try JPEGQuality(ffmpegValue: 4) : nil
+        )
     }
 }
 

@@ -1,5 +1,7 @@
 import Combine
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 
 public struct EditingCommand: Equatable, Sendable {
     public let executablePath: String
@@ -203,6 +205,20 @@ public protocol VideoEditPlanOutputVerifying: Sendable {
 
 public protocol VideoSpeedOutputVerifying: Sendable {
     func verify(request: VideoSpeedRequest, outputURL: URL) async throws
+}
+
+public protocol FrameExportOutputVerifying: Sendable {
+    func verify(request: FrameExportRequest, outputURL: URL) async throws -> FrameImageInfo
+}
+
+public struct FrameImageInfo: Equatable, Sendable {
+    public let format: FrameImageFormat
+    public let dimensions: VideoDimensions
+
+    public init(format: FrameImageFormat, dimensions: VideoDimensions) {
+        self.format = format
+        self.dimensions = dimensions
+    }
 }
 
 public enum TrimOutputValidationError: LocalizedError, Equatable, Sendable {
@@ -428,6 +444,49 @@ public enum VideoSpeedOutputValidator {
     }
 }
 
+public enum FrameExportOutputValidator {
+    public static func verify(imageURL: URL, request: FrameExportRequest) throws -> FrameImageInfo {
+        guard let source = CGImageSourceCreateWithURL(imageURL as CFURL, nil) else {
+            throw FrameExportValidationError.wrongFormat(expected: request.format, actual: nil)
+        }
+        guard CGImageSourceGetCount(source) == 1 else {
+            throw FrameExportValidationError.wrongFormat(expected: request.format, actual: nil)
+        }
+        let actualFormat = frameFormat(for: CGImageSourceGetType(source))
+        guard actualFormat == request.format else {
+            throw FrameExportValidationError.wrongFormat(expected: request.format, actual: actualFormat)
+        }
+        guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight] as? Int,
+              width > 0,
+              height > 0 else {
+            throw FrameExportValidationError.invalidDimensions
+        }
+        let actualDimensions = VideoDimensions(width: width, height: height)
+        let expectedDimensions = try request.expectedDimensions()
+        guard actualDimensions == expectedDimensions else {
+            throw FrameExportValidationError.wrongDimensions(expected: expectedDimensions, actual: actualDimensions)
+        }
+        guard imageURL.pathExtension.lowercased() == request.format.fileExtension else {
+            throw FrameExportValidationError.wrongFormat(expected: request.format, actual: actualFormat)
+        }
+        return FrameImageInfo(format: request.format, dimensions: actualDimensions)
+    }
+
+    private static func frameFormat(for type: CFString?) -> FrameImageFormat? {
+        guard let type else { return nil }
+        let identifier = type as String
+        if identifier == UTType.png.identifier {
+            return .png
+        }
+        if identifier == UTType.jpeg.identifier {
+            return .jpeg
+        }
+        return nil
+    }
+}
+
 public struct FFprobeCompressionOutputVerifier: CompressionOutputVerifying {
     private let ffprobePath: String
 
@@ -490,6 +549,14 @@ public struct FFprobeVideoSpeedOutputVerifier: VideoSpeedOutputVerifying {
     public func verify(request: VideoSpeedRequest, outputURL: URL) async throws {
         let metadata = try await FFprobeRunner().loadMetadata(ffprobePath: ffprobePath, inputURL: outputURL)
         try VideoSpeedOutputValidator.verify(metadata: metadata, request: request)
+    }
+}
+
+public struct NativeFrameExportOutputVerifier: FrameExportOutputVerifying {
+    public init() {}
+
+    public func verify(request: FrameExportRequest, outputURL: URL) async throws -> FrameImageInfo {
+        try FrameExportOutputValidator.verify(imageURL: outputURL, request: request)
     }
 }
 
@@ -906,6 +973,35 @@ public final class VideoEditingService: @unchecked Sendable {
         EditingCommand(executablePath: ffmpegPath, arguments: try speedArguments(for: request))
     }
 
+    public func frameExportArguments(for request: FrameExportRequest) throws -> [String] {
+        try request.validate()
+        var arguments = [
+            "-y",
+            "-nostdin",
+            "-i", request.inputURL.path,
+            "-ss", FrameExportTimestamp.ffmpegSeconds(request.timestampSeconds),
+            "-map", "0:v:0",
+            "-frames:v", "1"
+        ]
+        if request.format == .jpeg {
+            guard let jpegQuality = request.jpegQuality else {
+                throw FrameExportValidationError.invalidJPEGQuality
+            }
+            arguments += ["-q:v", String(jpegQuality.ffmpegValue)]
+        }
+        arguments += [
+            "-an",
+            "-sn",
+            "-dn",
+            request.outputURL.path
+        ]
+        return arguments
+    }
+
+    public func frameExportCommand(ffmpegPath: String, request: FrameExportRequest) throws -> EditingCommand {
+        EditingCommand(executablePath: ffmpegPath, arguments: try frameExportArguments(for: request))
+    }
+
     public func requestCancellation(state: EditingOperationState) {
         cancellationFlag.set(true)
         Task { @MainActor in
@@ -1209,6 +1305,49 @@ public final class VideoEditingService: @unchecked Sendable {
         }
     }
 
+    public func runFrameExport(
+        ffmpegPath: String,
+        request: FrameExportRequest,
+        state: EditingOperationState,
+        verifier: (any FrameExportOutputVerifying)? = nil
+    ) async {
+        cancellationFlag.set(false)
+
+        await MainActor.run {
+            state.phase = .starting
+            state.statusText = "Preparing frame export..."
+            state.message = nil
+            state.outputURL = nil
+            state.diagnostics = EditingDiagnostics(ffmpegPath: ffmpegPath, startedAt: Date(), lastActivityAt: Date())
+        }
+
+        do {
+            try request.validate()
+            try validatePreflight(ffmpegPath: ffmpegPath, inputURL: request.inputURL, outputURL: request.outputURL)
+            let command = try frameExportCommand(ffmpegPath: ffmpegPath, request: request)
+            try await execute(
+                command: command,
+                totalDuration: 1,
+                outputURL: request.outputURL,
+                state: state,
+                runningStatus: "Exporting frame...",
+                completedStatus: "Frame export complete"
+            )
+
+            let outputVerifier = verifier ?? NativeFrameExportOutputVerifier()
+            let imageInfo = try await outputVerifier.verify(request: request, outputURL: request.outputURL)
+            let outputSize = fileSystem.fileSize(at: request.outputURL)
+            await MainActor.run {
+                state.statusText = "Frame export complete"
+                state.message = frameExportSuccessMessage(request: request, imageInfo: imageInfo, outputSize: outputSize)
+            }
+        } catch ProcessExecutionError.launchFailed(let message) {
+            await fail(state: state, error: VideoEditingError.launchFailed(message))
+        } catch {
+            await fail(state: state, error: error)
+        }
+    }
+
     private func validatePreflight(ffmpegPath: String, request: EditingRequest) throws {
         _ = try request.trimPlan()
         try validatePreflight(ffmpegPath: ffmpegPath, inputURL: request.inputURL, outputURL: request.outputURL)
@@ -1328,6 +1467,21 @@ public final class VideoEditingService: @unchecked Sendable {
             lines.append("Output size: \(ByteCountFormatter.string(fromByteCount: Int64(outputSize), countStyle: .file))")
         }
         lines.append("Saved: \(request.outputURL.path)")
+        return lines.joined(separator: "\n")
+    }
+
+    private func frameExportSuccessMessage(request: FrameExportRequest, imageInfo: FrameImageInfo, outputSize: UInt64?) -> String {
+        var lines = [
+            "Time: \(FrameExportTimestamp.displayTime(request.timestampSeconds))",
+            "Format: \(request.format.title)",
+            "Dimensions: \(imageInfo.dimensions.width)x\(imageInfo.dimensions.height)"
+        ]
+        if let outputSize {
+            lines.append("Size: \(ByteCountFormatter.string(fromByteCount: Int64(outputSize), countStyle: .file))")
+        }
+        lines.append("")
+        lines.append("Saved:")
+        lines.append(request.outputURL.path)
         return lines.joined(separator: "\n")
     }
 

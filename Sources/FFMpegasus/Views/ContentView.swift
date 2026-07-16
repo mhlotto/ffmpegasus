@@ -148,6 +148,12 @@ final class EditingOperationController: ObservableObject {
         }
     }
 
+    func exportFrame(ffmpegPath: String, request: FrameExportRequest, state: EditingOperationState) {
+        Task {
+            await editingService.runFrameExport(ffmpegPath: ffmpegPath, request: request, state: state)
+        }
+    }
+
     func cancel(state: EditingOperationState) {
         editingService.requestCancellation(state: state)
     }
@@ -187,6 +193,8 @@ struct ContentView: View {
                         onTransform: startTransform,
                         onExportPlan: startEditPlanExport,
                         onChangeSpeed: startSpeedChange,
+                        onExportFrame: startFrameExport,
+                        currentPlaybackTime: currentPlaybackTime,
                         onCancel: { editingController.cancel(state: operationState) }
                     )
                     OperationProgressView(state: operationState, onCancel: { editingController.cancel(state: operationState) })
@@ -271,5 +279,14 @@ struct ContentView: View {
 
     private func startSpeedChange(_ request: VideoSpeedRequest) {
         editingController.changeSpeed(ffmpegPath: model.ffmpegPath, ffprobePath: model.ffprobePath, request: request, state: operationState)
+    }
+
+    private func startFrameExport(_ request: FrameExportRequest) {
+        editingController.exportFrame(ffmpegPath: model.ffmpegPath, request: request, state: operationState)
+    }
+
+    private func currentPlaybackTime() -> TimeInterval {
+        let seconds = model.player?.currentTime().seconds ?? model.currentTime
+        return seconds.isFinite ? seconds : model.currentTime
     }
 }

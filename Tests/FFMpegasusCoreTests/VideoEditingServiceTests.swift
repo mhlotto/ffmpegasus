@@ -129,6 +129,17 @@ struct FakeSpeedVerifier: VideoSpeedOutputVerifying {
     }
 }
 
+struct FakeFrameExportVerifier: FrameExportOutputVerifying {
+    var error: Error?
+
+    func verify(request: FrameExportRequest, outputURL: URL) async throws -> FrameImageInfo {
+        if let error {
+            throw error
+        }
+        return FrameImageInfo(format: request.format, dimensions: (try? request.expectedDimensions()) ?? request.sourceDimensions)
+    }
+}
+
 @MainActor
 final class VideoEditingServiceTests: XCTestCase {
     private let ffmpegPath = "/opt/homebrew/bin/ffmpeg"
@@ -642,6 +653,85 @@ final class VideoEditingServiceTests: XCTestCase {
         XCTAssertTrue(summary.contains("not executable"))
     }
 
+    func testFrameExportSucceedsWithValidOutput() async {
+        let process = FakeEditingProcessExecutor()
+        let state = EditingOperationState()
+        let service = VideoEditingService(processExecutor: process, fileSystem: validFileSystem(outputSize: 2048))
+
+        await service.runFrameExport(
+            ffmpegPath: ffmpegPath,
+            request: frameExportRequest(),
+            state: state,
+            verifier: FakeFrameExportVerifier()
+        )
+
+        XCTAssertEqual(state.phase, .completed(outputURL: outputURL(), byteCount: 2048))
+        XCTAssertEqual(state.status, "Frame export complete")
+        XCTAssertEqual(process.command?.arguments.commandValue(after: "-frames:v"), "1")
+    }
+
+    func testFrameExportExitZeroWithMissingOutputFails() async {
+        let state = await runFrameExportWith(outputExists: false, outputSize: nil)
+
+        guard case .failed(let summary) = state.phase else {
+            return XCTFail("Expected failed state")
+        }
+        XCTAssertTrue(summary.contains("no output file was created"))
+    }
+
+    func testFrameExportExitZeroWithZeroByteOutputFails() async {
+        let state = await runFrameExportWith(outputExists: true, outputSize: 0)
+
+        guard case .failed(let summary) = state.phase else {
+            return XCTFail("Expected failed state")
+        }
+        XCTAssertTrue(summary.contains("output file is empty"))
+    }
+
+    func testFrameExportVerificationFailureFails() async {
+        let state = await runFrameExportWith(
+            verifier: FakeFrameExportVerifier(error: FrameExportValidationError.wrongFormat(expected: .png, actual: .jpeg))
+        )
+
+        guard case .failed(let summary) = state.phase else {
+            return XCTFail("Expected failed state")
+        }
+        XCTAssertTrue(summary.contains("expected PNG"))
+    }
+
+    func testFrameExportRejectsInputAndOutputPathsBeingIdentical() async {
+        let state = await runFrameExportWith(request: frameExportRequest(outputURL: inputURL()))
+
+        guard case .failed(let summary) = state.phase else {
+            return XCTFail("Expected failed state")
+        }
+        XCTAssertTrue(summary.contains("different from the input"))
+    }
+
+    func testFrameExportCancellationRemovesIncompleteOutput() async {
+        let process = FakeEditingProcessExecutor()
+        process.waitForCancel = true
+        let fileSystem = validFileSystem(outputSize: 12)
+        let state = EditingOperationState()
+        let service = VideoEditingService(processExecutor: process, fileSystem: fileSystem)
+
+        let task = Task {
+            await service.runFrameExport(
+                ffmpegPath: ffmpegPath,
+                request: frameExportRequest(),
+                state: state,
+                verifier: FakeFrameExportVerifier()
+            )
+        }
+
+        try? await Task.sleep(nanoseconds: 5_000_000)
+        service.requestCancellation(state: state)
+        await task.value
+
+        XCTAssertEqual(state.phase, .cancelled)
+        XCTAssertEqual(fileSystem.removedFiles, [outputURL().path])
+    }
+
     private func runWith(
         process: FakeEditingProcessExecutor = FakeEditingProcessExecutor(),
         fileSystem: FakeEditingFileSystem? = nil,
@@ -801,6 +891,26 @@ final class VideoEditingServiceTests: XCTestCase {
         return state
     }
 
+    private func runFrameExportWith(
+        verifier: FakeFrameExportVerifier = FakeFrameExportVerifier(),
+        request: FrameExportRequest? = nil,
+        outputExists: Bool = true,
+        outputSize: UInt64? = 100
+    ) async -> EditingOperationState {
+        let state = EditingOperationState()
+        let service = VideoEditingService(
+            processExecutor: FakeEditingProcessExecutor(),
+            fileSystem: validFileSystem(outputExists: outputExists, outputSize: outputSize)
+        )
+        await service.runFrameExport(
+            ffmpegPath: ffmpegPath,
+            request: request ?? frameExportRequest(),
+            state: state,
+            verifier: verifier
+        )
+        return state
+    }
+
     private func compressionRequest() -> CompressionRequest {
         CompressionRequest(
             inputURL: inputURL(),
@@ -861,6 +971,20 @@ final class VideoEditingServiceTests: XCTestCase {
             hasAudioStream: true,
             speed: speed,
             audioMode: .keep
+        )
+    }
+
+    private func frameExportRequest(outputURL: URL? = nil) -> FrameExportRequest {
+        FrameExportRequest(
+            inputURL: inputURL(),
+            outputURL: outputURL ?? self.outputURL(),
+            timestampSeconds: 1.25,
+            sourceDuration: 100,
+            sourceDimensions: VideoDimensions(width: 1920, height: 1080),
+            sourceRotationDegrees: nil,
+            hasVideoStream: true,
+            format: .png,
+            jpegQuality: nil
         )
     }
 
