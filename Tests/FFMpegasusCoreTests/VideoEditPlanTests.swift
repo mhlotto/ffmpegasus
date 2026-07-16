@@ -10,8 +10,10 @@ final class VideoEditPlanTests: XCTestCase {
         XCTAssertEqual(try plan(transform: transform(flipHorizontal: true)).executionStrategy(), .reencode)
         XCTAssertEqual(try plan(resize: ResizeConfiguration(resolution: .p720, customHeight: nil)).executionStrategy(), .reencode)
         XCTAssertEqual(try plan(compression: compression()).executionStrategy(), .reencode)
+        XCTAssertEqual(try plan(speed: speed(1.5)).executionStrategy(), .reencode)
         XCTAssertEqual(try plan(trim: trim(.fast), transform: transform(rotation: .clockwise90)).executionStrategy(), .reencode)
         XCTAssertEqual(try plan(trim: trim(.fast), compression: compression()).executionStrategy(), .reencode)
+        XCTAssertEqual(try plan(trim: trim(.fast), speed: speed(2.0)).executionStrategy(), .reencode)
     }
 
     func testFilterConstructionOrder() throws {
@@ -23,6 +25,11 @@ final class VideoEditPlanTests: XCTestCase {
         XCTAssertEqual(
             try plan(transform: transform(rotation: .counterclockwise90, flipHorizontal: true, flipVertical: true), resize: ResizeConfiguration(resolution: .p720, customHeight: nil)).filterChain(),
             "transpose=cclock,hflip,vflip,scale=-2:min(720\\,ih)"
+        )
+        XCTAssertEqual(try plan(speed: speed(1.5)).filterChain(), "setpts=PTS/1.5")
+        XCTAssertEqual(
+            try plan(transform: transform(rotation: .clockwise90, flipHorizontal: true), resize: ResizeConfiguration(resolution: .p720, customHeight: nil), speed: speed(0.5)).filterChain(),
+            "transpose=clock,hflip,scale=-2:min(720\\,ih),setpts=PTS/0.5"
         )
     }
 
@@ -83,6 +90,51 @@ final class VideoEditPlanTests: XCTestCase {
         XCTAssertEqual(command.arguments.commandValue(after: "-metadata:s:v:0"), "rotate=0")
     }
 
+    func testCombinedCommandSpeedKeepsAudio() throws {
+        let command = try VideoEditingService().editPlanCommand(
+            ffmpegPath: "/opt/homebrew/bin/ffmpeg",
+            plan: plan(speed: speed(1.5))
+        )
+
+        XCTAssertEqual(command.arguments.commandValue(after: "-vf"), "setpts=PTS/1.5")
+        XCTAssertEqual(command.arguments.commandValue(after: "-af"), "atempo=1.5")
+        XCTAssertEqual(command.arguments.commandValue(after: "-c:v"), "libx264")
+        XCTAssertEqual(command.arguments.commandValue(after: "-c:a"), "aac")
+        XCTAssertEqual(command.arguments.commandValue(after: "-b:a"), "128k")
+        XCTAssertFalse(command.arguments.contains("-c"))
+        XCTAssertFalse(command.arguments.contains("copy"))
+    }
+
+    func testCombinedCommandSpeedRemovesAudio() throws {
+        let command = try VideoEditingService().editPlanCommand(
+            ffmpegPath: "/opt/homebrew/bin/ffmpeg",
+            plan: plan(speed: speed(2.0), audioMode: .remove)
+        )
+
+        XCTAssertEqual(command.arguments.commandValue(after: "-vf"), "setpts=PTS/2.0")
+        XCTAssertTrue(command.arguments.contains("-an"))
+        XCTAssertFalse(command.arguments.contains("-af"))
+        XCTAssertFalse(command.arguments.contains("0:a:0?"))
+    }
+
+    func testCombinedCommandTrimRotateResizeSpeedRemoveAudio() throws {
+        let command = try VideoEditingService().editPlanCommand(
+            ffmpegPath: "/opt/homebrew/bin/ffmpeg",
+            plan: plan(
+                trim: trim(.fast, start: 2, end: 3),
+                transform: transform(rotation: .clockwise90),
+                resize: ResizeConfiguration(resolution: .p720, customHeight: nil),
+                speed: speed(2.0),
+                audioMode: .remove
+            )
+        )
+
+        XCTAssertEqual(command.arguments.commandValue(after: "-ss"), "2.000000")
+        XCTAssertEqual(command.arguments.commandValue(after: "-t"), "15.000000")
+        XCTAssertEqual(command.arguments.commandValue(after: "-vf"), "transpose=clock,scale=-2:min(720\\,ih),setpts=PTS/2.0")
+        XCTAssertTrue(command.arguments.contains("-an"))
+    }
+
     func testCombinedCommandWithoutAudioSourceUsesAn() throws {
         let command = try VideoEditingService().editPlanCommand(
             ffmpegPath: "/opt/homebrew/bin/ffmpeg",
@@ -116,6 +168,8 @@ final class VideoEditPlanTests: XCTestCase {
 
     func testPlannedDuration() throws {
         XCTAssertEqual(try plan(transform: transform(flipHorizontal: true)).trimPlan().outputDuration, 20)
+        XCTAssertEqual(try plan(speed: speed(2.0)).outputDuration(), 10)
+        XCTAssertEqual(try plan(trim: trim(.fast, start: 2, end: 3), speed: speed(0.5)).outputDuration(), 30)
         XCTAssertEqual(try plan(trim: trim(.fast, start: 2.5, end: 0)).trimPlan().outputDuration, 17.5)
         XCTAssertEqual(try plan(trim: trim(.fast, start: 0, end: 3.25)).trimPlan().outputDuration, 16.75)
         XCTAssertEqual(try plan(trim: trim(.fast, start: 2.5, end: 3.25)).trimPlan().outputDuration, 14.25)
@@ -140,6 +194,10 @@ final class VideoEditPlanTests: XCTestCase {
         CompressionConfiguration(quality: .balanced, customCRF: 24, encoderPreset: .medium)
     }
 
+    private func speed(_ multiplier: Double) -> VideoSpeed {
+        try! VideoSpeed(multiplier: multiplier)
+    }
+
     private func plan(
         input: String = "/tmp/input.mov",
         output: String = "/tmp/output.mp4",
@@ -149,6 +207,7 @@ final class VideoEditPlanTests: XCTestCase {
         transform: VideoTransformConfiguration? = nil,
         resize: ResizeConfiguration? = nil,
         compression: CompressionConfiguration? = nil,
+        speed: VideoSpeed? = nil,
         audioMode: ExportAudioMode = .keep,
         hasAudio: Bool = true
     ) -> VideoEditPlan {
@@ -164,6 +223,7 @@ final class VideoEditPlanTests: XCTestCase {
             transform: transform,
             resize: resize,
             compression: compression,
+            speed: speed,
             audioMode: audioMode
         )
     }

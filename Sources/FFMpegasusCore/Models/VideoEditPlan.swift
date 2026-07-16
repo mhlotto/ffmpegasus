@@ -105,6 +105,7 @@ public struct VideoEditPlan: Equatable, Sendable {
     public let transform: VideoTransformConfiguration?
     public let resize: ResizeConfiguration?
     public let compression: CompressionConfiguration?
+    public let speed: VideoSpeed?
     public let audioMode: ExportAudioMode
 
     public init(
@@ -119,6 +120,7 @@ public struct VideoEditPlan: Equatable, Sendable {
         transform: VideoTransformConfiguration?,
         resize: ResizeConfiguration?,
         compression: CompressionConfiguration?,
+        speed: VideoSpeed? = nil,
         audioMode: ExportAudioMode
     ) {
         self.inputURL = inputURL
@@ -132,6 +134,7 @@ public struct VideoEditPlan: Equatable, Sendable {
         self.transform = transform
         self.resize = resize
         self.compression = compression
+        self.speed = speed
         self.audioMode = audioMode
     }
 
@@ -140,6 +143,7 @@ public struct VideoEditPlan: Equatable, Sendable {
             (transform?.hasTransformation == true) ||
             resize != nil ||
             compression != nil ||
+            speed != nil ||
             audioMode == .remove
     }
 
@@ -160,7 +164,14 @@ public struct VideoEditPlan: Equatable, Sendable {
         if transform?.hasTransformation == true { return .reencode }
         if resize != nil { return .reencode }
         if compression != nil { return .reencode }
+        if speed != nil { return .reencode }
         return .streamCopy
+    }
+
+    public func outputDuration() throws -> TimeInterval {
+        let duration = try trimPlan().outputDuration
+        guard let speed else { return duration }
+        return try speed.expectedDuration(sourceDuration: duration)
     }
 
     public func qualitySettings() throws -> CompressionQualitySettings {
@@ -210,6 +221,9 @@ public struct VideoEditPlan: Equatable, Sendable {
         if let scaleFilter = try scaleFilter() {
             filters.append(scaleFilter)
         }
+        if let speed {
+            filters.append(speed.videoFilter())
+        }
         guard !filters.isEmpty else { return nil }
         return filters.joined(separator: ",")
     }
@@ -235,6 +249,10 @@ public struct VideoEditPlan: Equatable, Sendable {
         if let compression {
             _ = try compression.settings()
         }
+        if let speed, speed.isNoChange {
+            throw VideoSpeedValidationError.noSpeedChange
+        }
+        _ = try outputDuration()
     }
 }
 

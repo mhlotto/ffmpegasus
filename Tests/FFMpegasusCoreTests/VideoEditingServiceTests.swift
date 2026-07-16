@@ -119,6 +119,16 @@ struct FakeEditPlanVerifier: VideoEditPlanOutputVerifying {
     }
 }
 
+struct FakeSpeedVerifier: VideoSpeedOutputVerifying {
+    var error: Error?
+
+    func verify(request: VideoSpeedRequest, outputURL: URL) async throws {
+        if let error {
+            throw error
+        }
+    }
+}
+
 @MainActor
 final class VideoEditingServiceTests: XCTestCase {
     private let ffmpegPath = "/opt/homebrew/bin/ffmpeg"
@@ -538,6 +548,89 @@ final class VideoEditingServiceTests: XCTestCase {
         XCTAssertEqual(fileSystem.removedFiles, [outputURL().path])
     }
 
+    func testSpeedChangeSucceedsWithValidOutput() async throws {
+        let process = FakeEditingProcessExecutor()
+        let fileSystem = validFileSystem(outputSize: 4096)
+        fileSystem.files.insert(inputURL().path)
+        fileSystem.sizes[inputURL().path] = 10_000
+        let state = EditingOperationState()
+        let service = VideoEditingService(processExecutor: process, fileSystem: fileSystem, encoderChecker: FakeEncoderChecker())
+
+        await service.runSpeedChange(
+            ffmpegPath: ffmpegPath,
+            ffprobePath: "/opt/homebrew/bin/ffprobe",
+            request: speedRequest(speed: try VideoSpeed(multiplier: 1.5)),
+            state: state,
+            verifier: FakeSpeedVerifier()
+        )
+
+        XCTAssertEqual(state.phase, .completed(outputURL: outputURL(), byteCount: 4096))
+        XCTAssertEqual(state.status, "Speed change complete")
+        XCTAssertEqual(process.command?.arguments.commandValue(after: "-vf"), "setpts=PTS/1.5")
+        XCTAssertTrue(state.message?.contains("Speed: 1_5x") == true)
+    }
+
+    func testSpeedChangeMissingLibx264Fails() async {
+        let state = await runSpeedWith(encoderChecker: FakeEncoderChecker(supports: false))
+
+        guard case .failed(let summary) = state.phase else {
+            return XCTFail("Expected failed state")
+        }
+        XCTAssertTrue(summary.contains("Changing speed requires"))
+    }
+
+    func testSpeedChangeVerificationFailureFails() async {
+        let state = await runSpeedWith(verifier: FakeSpeedVerifier(error: VideoSpeedValidationError.wrongCodec("hevc")))
+
+        guard case .failed(let summary) = state.phase else {
+            return XCTFail("Expected failed state")
+        }
+        XCTAssertTrue(summary.contains("not H.264"))
+    }
+
+    func testSpeedChangeExitZeroWithMissingOutputFails() async {
+        let state = await runSpeedWith(outputExists: false, outputSize: nil)
+
+        guard case .failed(let summary) = state.phase else {
+            return XCTFail("Expected failed state")
+        }
+        XCTAssertTrue(summary.contains("no output file was created"))
+    }
+
+    func testSpeedChangeExitZeroWithZeroByteOutputFails() async {
+        let state = await runSpeedWith(outputExists: true, outputSize: 0)
+
+        guard case .failed(let summary) = state.phase else {
+            return XCTFail("Expected failed state")
+        }
+        XCTAssertTrue(summary.contains("output file is empty"))
+    }
+
+    func testSpeedChangeCancellationRemovesIncompleteOutput() async throws {
+        let process = FakeEditingProcessExecutor()
+        process.waitForCancel = true
+        let fileSystem = validFileSystem(outputSize: 12)
+        let state = EditingOperationState()
+        let service = VideoEditingService(processExecutor: process, fileSystem: fileSystem, encoderChecker: FakeEncoderChecker())
+
+        let task = Task {
+            await service.runSpeedChange(
+                ffmpegPath: ffmpegPath,
+                ffprobePath: "/opt/homebrew/bin/ffprobe",
+                request: speedRequest(speed: try! VideoSpeed(multiplier: 0.5)),
+                state: state,
+                verifier: FakeSpeedVerifier()
+            )
+        }
+
+        try? await Task.sleep(nanoseconds: 5_000_000)
+        service.requestCancellation(state: state)
+        await task.value
+
+        XCTAssertEqual(state.phase, .cancelled)
+        XCTAssertEqual(fileSystem.removedFiles, [outputURL().path])
+    }
+
     func testRejectsNonExecutableFFmpegPath() async {
         let fileSystem = validFileSystem(outputSize: 100)
         fileSystem.executables.remove(ffmpegPath)
@@ -686,6 +779,28 @@ final class VideoEditingServiceTests: XCTestCase {
         return state
     }
 
+    private func runSpeedWith(
+        encoderChecker: FakeEncoderChecker = FakeEncoderChecker(),
+        verifier: FakeSpeedVerifier = FakeSpeedVerifier(),
+        outputExists: Bool = true,
+        outputSize: UInt64? = 100
+    ) async -> EditingOperationState {
+        let state = EditingOperationState()
+        let service = VideoEditingService(
+            processExecutor: FakeEditingProcessExecutor(),
+            fileSystem: validFileSystem(outputExists: outputExists, outputSize: outputSize),
+            encoderChecker: encoderChecker
+        )
+        await service.runSpeedChange(
+            ffmpegPath: ffmpegPath,
+            ffprobePath: "/opt/homebrew/bin/ffprobe",
+            request: speedRequest(speed: try! VideoSpeed(multiplier: 2.0)),
+            state: state,
+            verifier: verifier
+        )
+        return state
+    }
+
     private func compressionRequest() -> CompressionRequest {
         CompressionRequest(
             inputURL: inputURL(),
@@ -731,6 +846,20 @@ final class VideoEditingServiceTests: XCTestCase {
             transform: VideoTransformConfiguration(rotation: .clockwise90, flipHorizontal: false, flipVertical: false),
             resize: nil,
             compression: nil,
+            audioMode: .keep
+        )
+    }
+
+    private func speedRequest(speed: VideoSpeed) -> VideoSpeedRequest {
+        VideoSpeedRequest(
+            inputURL: inputURL(),
+            outputURL: outputURL(),
+            sourceDuration: 100,
+            sourceDimensions: VideoDimensions(width: 1920, height: 1080),
+            sourceRotationDegrees: nil,
+            hasVideoStream: true,
+            hasAudioStream: true,
+            speed: speed,
             audioMode: .keep
         )
     }

@@ -37,6 +37,27 @@ final class VideoEditPlanVerificationTests: XCTestCase {
         XCTAssertThrowsError(try VideoEditPlanOutputValidator.verify(metadata: metadata(rotationDegrees: 90), plan: plan(transform: transform(rotation: .clockwise90))))
     }
 
+    func testSpeedAdjustedDurationSucceeds() throws {
+        XCTAssertNoThrow(try VideoEditPlanOutputValidator.verify(
+            metadata: metadata(duration: 10, audioDuration: 10),
+            plan: plan(speed: try VideoSpeed(multiplier: 2.0))
+        ))
+    }
+
+    func testSpeedAdjustedWrongDurationFails() throws {
+        XCTAssertThrowsError(try VideoEditPlanOutputValidator.verify(
+            metadata: metadata(duration: 20, audioDuration: 20),
+            plan: plan(speed: try VideoSpeed(multiplier: 2.0))
+        ))
+    }
+
+    func testSpeedAudioVideoDurationMismatchFails() throws {
+        XCTAssertThrowsError(try VideoEditPlanOutputValidator.verify(
+            metadata: metadata(duration: 10, audioDuration: 9.7),
+            plan: plan(speed: try VideoSpeed(multiplier: 2.0))
+        ))
+    }
+
     func testMissingVideoFails() {
         XCTAssertThrowsError(try VideoEditPlanOutputValidator.verify(metadata: metadata(videoCodec: nil), plan: plan(transform: transform(rotation: .clockwise90))))
     }
@@ -53,6 +74,7 @@ final class VideoEditPlanVerificationTests: XCTestCase {
         trim: TrimConfiguration? = nil,
         transform: VideoTransformConfiguration? = nil,
         resize: ResizeConfiguration? = nil,
+        speed: VideoSpeed? = nil,
         audioMode: ExportAudioMode = .keep,
         hasAudio: Bool = true
     ) -> VideoEditPlan {
@@ -68,6 +90,7 @@ final class VideoEditPlanVerificationTests: XCTestCase {
             transform: transform,
             resize: resize,
             compression: nil,
+            speed: speed,
             audioMode: audioMode
         )
     }
@@ -78,8 +101,9 @@ final class VideoEditPlanVerificationTests: XCTestCase {
         height: Int = 1080,
         videoCodec: String? = "h264",
         audioCodec: String? = "aac",
+        audioDuration: TimeInterval? = nil,
         rotationDegrees: Int? = nil
     ) -> VideoMetadata {
-        VideoMetadata(duration: duration, width: width, height: height, videoCodec: videoCodec, audioCodec: audioCodec, frameRate: 30, pixelFormat: "yuv420p", rotationDegrees: rotationDegrees)
+        VideoMetadata(duration: duration, width: width, height: height, videoCodec: videoCodec, audioCodec: audioCodec, audioDuration: audioDuration, frameRate: 30, pixelFormat: "yuv420p", rotationDegrees: rotationDegrees)
     }
 }

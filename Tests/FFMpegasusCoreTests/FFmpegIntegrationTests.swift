@@ -468,15 +468,20 @@ final class FFmpegIntegrationTests: XCTestCase {
             transform: VideoTransformConfiguration(rotation: .clockwise90, flipHorizontal: false, flipVertical: false),
             resize: ResizeConfiguration(resolution: .p720, customHeight: nil),
             compression: CompressionConfiguration(quality: .balanced, customCRF: 24, encoderPreset: .medium),
+            speed: try VideoSpeed(multiplier: 2.0),
             audioMode: .keep
         )
         XCTAssertEqual(try planB.executionStrategy(), .reencode)
+        let planBCommand = try service.editPlanCommand(ffmpegPath: ffmpegPath, plan: planB)
+        XCTAssertEqual(planBCommand.arguments.commandValue(after: "-vf"), "transpose=clock,scale=-2:min(720\\,ih),setpts=PTS/2.0")
+        XCTAssertEqual(planBCommand.arguments.commandValue(after: "-af"), "atempo=2.0")
         try await runEditPlan(service: service, ffmpegPath: ffmpegPath, ffprobePath: ffprobePath, plan: planB)
         metadata = try await FFprobeRunner().loadMetadata(ffprobePath: ffprobePath, inputURL: planBOutput)
         XCTAssertEqual(metadata.videoCodec, "h264")
         XCTAssertNotNil(metadata.audioCodec)
         XCTAssertEqual(metadata.width, 406)
         XCTAssertEqual(metadata.height, 720)
+        XCTAssertEqual(metadata.duration, 2.0, accuracy: max(0.15, 2.0 / 10.0) + 0.001)
 
         let planC = VideoEditPlan(
             inputURL: input,
@@ -502,6 +507,93 @@ final class FFmpegIntegrationTests: XCTestCase {
 
         let files = try FileManager.default.contentsOfDirectory(atPath: directory.path)
         XCTAssertEqual(Set(files), Set(["input.mp4", "plan-a.mp4", "plan-b.mp4", "plan-c.mp4"]))
+    }
+
+    func testOptionalFFmpegSyntheticSpeedChanges() async throws {
+        let ffmpegPath = "/opt/homebrew/bin/ffmpeg"
+        let ffprobePath = "/opt/homebrew/bin/ffprobe"
+        guard FileManager.default.isExecutableFile(atPath: ffmpegPath),
+              FileManager.default.isExecutableFile(atPath: ffprobePath) else {
+            throw XCTSkip("FFmpeg or FFprobe is not available at the default Homebrew paths")
+        }
+        let encoders = try await FFmpegRunner().encoders(ffmpegPath: ffmpegPath)
+        guard encoders.contains("libx264") else {
+            throw XCTSkip("FFmpeg does not include libx264")
+        }
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let input = directory.appendingPathComponent("input.mp4")
+        let noAudioInput = directory.appendingPathComponent("input-no-audio.mp4")
+        let service = VideoEditingService()
+
+        let generate = try await ProcessRunner().run(
+            executablePath: ffmpegPath,
+            arguments: [
+                "-y", "-nostdin",
+                "-f", "lavfi",
+                "-i", "testsrc=size=160x120:rate=12:duration=2",
+                "-f", "lavfi",
+                "-i", "sine=frequency=880:duration=2",
+                "-shortest",
+                "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-b:a", "96k",
+                input.path
+            ]
+        )
+        XCTAssertEqual(generate.exitCode, 0, generate.stderrText)
+
+        let generateNoAudio = try await ProcessRunner().run(
+            executablePath: ffmpegPath,
+            arguments: [
+                "-y", "-nostdin",
+                "-f", "lavfi",
+                "-i", "testsrc=size=160x120:rate=12:duration=2",
+                "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
+                noAudioInput.path
+            ]
+        )
+        XCTAssertEqual(generateNoAudio.exitCode, 0, generateNoAudio.stderrText)
+
+        try await runSpeed(
+            service: service,
+            ffmpegPath: ffmpegPath,
+            ffprobePath: ffprobePath,
+            request: speedRequest(input: input, output: directory.appendingPathComponent("speed-0_5x.mp4"), speed: 0.5, hasAudio: true, audioMode: .keep)
+        )
+        try await runSpeed(
+            service: service,
+            ffmpegPath: ffmpegPath,
+            ffprobePath: ffprobePath,
+            request: speedRequest(input: input, output: directory.appendingPathComponent("speed-2x.mp4"), speed: 2.0, hasAudio: true, audioMode: .keep)
+        )
+        try await runSpeed(
+            service: service,
+            ffmpegPath: ffmpegPath,
+            ffprobePath: ffprobePath,
+            request: speedRequest(input: input, output: directory.appendingPathComponent("speed-0_25x.mp4"), speed: 0.25, hasAudio: true, audioMode: .keep)
+        )
+        try await runSpeed(
+            service: service,
+            ffmpegPath: ffmpegPath,
+            ffprobePath: ffprobePath,
+            request: speedRequest(input: input, output: directory.appendingPathComponent("speed-4x.mp4"), speed: 4.0, hasAudio: true, audioMode: .keep)
+        )
+        try await runSpeed(
+            service: service,
+            ffmpegPath: ffmpegPath,
+            ffprobePath: ffprobePath,
+            request: speedRequest(input: input, output: directory.appendingPathComponent("speed-muted.mp4"), speed: 1.5, hasAudio: true, audioMode: .remove)
+        )
+        try await runSpeed(
+            service: service,
+            ffmpegPath: ffmpegPath,
+            ffprobePath: ffprobePath,
+            request: speedRequest(input: noAudioInput, output: directory.appendingPathComponent("speed-no-audio.mp4"), speed: 1.5, hasAudio: false, audioMode: .keep)
+        )
     }
 
     private func transformRequest(
@@ -560,5 +652,47 @@ final class FFmpegIntegrationTests: XCTestCase {
         XCTAssertEqual(result.exitCode, 0, result.stderrText)
         let metadata = try await FFprobeRunner().loadMetadata(ffprobePath: ffprobePath, inputURL: plan.outputURL)
         XCTAssertNoThrow(try VideoEditPlanOutputValidator.verify(metadata: metadata, plan: plan))
+    }
+
+    private func speedRequest(
+        input: URL,
+        output: URL,
+        speed: Double,
+        hasAudio: Bool,
+        audioMode: SpeedAudioMode
+    ) throws -> VideoSpeedRequest {
+        VideoSpeedRequest(
+            inputURL: input,
+            outputURL: output,
+            sourceDuration: 2,
+            sourceDimensions: VideoDimensions(width: 160, height: 120),
+            sourceRotationDegrees: nil,
+            hasVideoStream: true,
+            hasAudioStream: hasAudio,
+            speed: try VideoSpeed(multiplier: speed),
+            audioMode: audioMode
+        )
+    }
+
+    private func runSpeed(
+        service: VideoEditingService,
+        ffmpegPath: String,
+        ffprobePath: String,
+        request: VideoSpeedRequest
+    ) async throws {
+        let command = try service.speedCommand(ffmpegPath: ffmpegPath, request: request)
+        let result = try await ProcessRunner().run(executablePath: command.executablePath, arguments: command.arguments)
+        XCTAssertEqual(result.exitCode, 0, result.stderrText)
+        let metadata = try await FFprobeRunner().loadMetadata(ffprobePath: ffprobePath, inputURL: request.outputURL)
+        XCTAssertEqual(metadata.videoCodec, "h264")
+        XCTAssertEqual(metadata.audioCodec != nil, request.keepsAudio)
+        XCTAssertNoThrow(try VideoSpeedOutputValidator.verify(metadata: metadata, request: request))
+    }
+}
+
+private extension Array where Element == String {
+    func commandValue(after option: String) -> String? {
+        guard let index = firstIndex(of: option), indices.contains(index + 1) else { return nil }
+        return self[index + 1]
     }
 }

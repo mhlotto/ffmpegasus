@@ -142,6 +142,12 @@ final class EditingOperationController: ObservableObject {
         }
     }
 
+    func changeSpeed(ffmpegPath: String, ffprobePath: String, request: VideoSpeedRequest, state: EditingOperationState) {
+        Task {
+            await editingService.runSpeedChange(ffmpegPath: ffmpegPath, ffprobePath: ffprobePath, request: request, state: state)
+        }
+    }
+
     func cancel(state: EditingOperationState) {
         editingService.requestCancellation(state: state)
     }
@@ -180,6 +186,7 @@ struct ContentView: View {
                         onCompress: startCompression,
                         onTransform: startTransform,
                         onExportPlan: startEditPlanExport,
+                        onChangeSpeed: startSpeedChange,
                         onCancel: { editingController.cancel(state: operationState) }
                     )
                     OperationProgressView(state: operationState, onCancel: { editingController.cancel(state: operationState) })
@@ -260,5 +267,9 @@ struct ContentView: View {
 
     private func startEditPlanExport(_ plan: VideoEditPlan) {
         editingController.exportPlan(ffmpegPath: model.ffmpegPath, ffprobePath: model.ffprobePath, plan: plan, state: operationState)
+    }
+
+    private func startSpeedChange(_ request: VideoSpeedRequest) {
+        editingController.changeSpeed(ffmpegPath: model.ffmpegPath, ffprobePath: model.ffprobePath, request: request, state: operationState)
     }
 }

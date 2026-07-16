@@ -6,16 +6,18 @@ public struct VideoMetadata: Equatable, Sendable {
     public let height: Int?
     public let videoCodec: String?
     public let audioCodec: String?
+    public let audioDuration: TimeInterval?
     public let frameRate: Double?
     public let pixelFormat: String?
     public let rotationDegrees: Int?
 
-    public init(duration: TimeInterval, width: Int?, height: Int?, videoCodec: String?, audioCodec: String?, frameRate: Double?, pixelFormat: String? = nil, rotationDegrees: Int? = nil) {
+    public init(duration: TimeInterval, width: Int?, height: Int?, videoCodec: String?, audioCodec: String?, audioDuration: TimeInterval? = nil, frameRate: Double?, pixelFormat: String? = nil, rotationDegrees: Int? = nil) {
         self.duration = duration
         self.width = width
         self.height = height
         self.videoCodec = videoCodec
         self.audioCodec = audioCodec
+        self.audioDuration = audioDuration
         self.frameRate = frameRate
         self.pixelFormat = pixelFormat
         self.rotationDegrees = rotationDegrees
@@ -42,6 +44,7 @@ public struct FFprobeResponse: Decodable, Sendable {
             height: videoStream?.height,
             videoCodec: videoStream?.codecName,
             audioCodec: audioStream?.codecName,
+            audioDuration: audioStream?.durationValue ?? (audioStream == nil ? nil : format?.durationValue),
             frameRate: videoStream?.frameRateValue,
             pixelFormat: videoStream?.pixelFormat,
             rotationDegrees: videoStream?.rotationDegrees
