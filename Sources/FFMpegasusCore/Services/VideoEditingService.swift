@@ -126,6 +126,7 @@ public final class EditingOperationState: ObservableObject {
 }
 
 public enum VideoEditingError: LocalizedError, Equatable, Sendable {
+    case inputMissing(String)
     case outputMatchesInput
     case missingOutputDirectory(String)
     case outputDirectoryNotWritable(String)
@@ -140,6 +141,8 @@ public enum VideoEditingError: LocalizedError, Equatable, Sendable {
 
     public var errorDescription: String? {
         switch self {
+        case .inputMissing(let path):
+            "Input file was not found: \(path)"
         case .outputMatchesInput:
             "Output path must be different from the input path."
         case .missingOutputDirectory(let path):
@@ -184,6 +187,7 @@ public protocol EditingFileSystemChecking: Sendable {
     func isWritableDirectory(at url: URL) -> Bool
     func isExecutableFile(at url: URL) -> Bool
     func fileSize(at url: URL) -> UInt64?
+    func contentsOfDirectory(at url: URL) -> [String]
     func removeFile(at url: URL)
 }
 
@@ -211,6 +215,10 @@ public protocol FrameExportOutputVerifying: Sendable {
     func verify(request: FrameExportRequest, outputURL: URL) async throws -> FrameImageInfo
 }
 
+public protocol IntervalFrameExportOutputVerifying: Sendable {
+    func verify(request: IntervalFrameExportRequest, files: [URL]) async throws -> IntervalFrameExportResult
+}
+
 public struct FrameImageInfo: Equatable, Sendable {
     public let format: FrameImageFormat
     public let dimensions: VideoDimensions
@@ -218,6 +226,20 @@ public struct FrameImageInfo: Equatable, Sendable {
     public init(format: FrameImageFormat, dimensions: VideoDimensions) {
         self.format = format
         self.dimensions = dimensions
+    }
+}
+
+public struct IntervalFrameExportResult: Equatable, Sendable {
+    public let imageCount: Int
+    public let dimensions: VideoDimensions
+    public let firstImageURL: URL
+    public let lastImageURL: URL
+
+    public init(imageCount: Int, dimensions: VideoDimensions, firstImageURL: URL, lastImageURL: URL) {
+        self.imageCount = imageCount
+        self.dimensions = dimensions
+        self.firstImageURL = firstImageURL
+        self.lastImageURL = lastImageURL
     }
 }
 
@@ -487,6 +509,81 @@ public enum FrameExportOutputValidator {
     }
 }
 
+public enum IntervalFrameExportOutputValidator {
+    public static let fullDecodeThreshold = 50
+
+    public static func matchingFiles(in directory: URL, request: IntervalFrameExportRequest, fileSystem: EditingFileSystemChecking) -> [URL] {
+        fileSystem.contentsOfDirectory(at: directory)
+            .filter { request.matchesGeneratedFrameName($0) }
+            .sorted()
+            .map { directory.appendingPathComponent($0) }
+    }
+
+    public static func verify(
+        request: IntervalFrameExportRequest,
+        files: [URL],
+        fileSystem: EditingFileSystemChecking = LocalEditingFileSystem()
+    ) throws -> IntervalFrameExportResult {
+        let files = files.sorted { $0.lastPathComponent < $1.lastPathComponent }
+        guard let first = files.first, let last = files.last else {
+            throw FrameExportValidationError.noImagesCreated
+        }
+
+        let expectedCount = request.expectedImageCount
+        guard abs(files.count - expectedCount) <= request.countTolerance else {
+            throw FrameExportValidationError.imageCountMismatch(
+                expected: expectedCount,
+                actual: files.count,
+                tolerance: request.countTolerance
+            )
+        }
+
+        for (index, file) in files.enumerated() {
+            let expected = request.outputURL(forSequenceNumber: index + 1).lastPathComponent
+            guard file.lastPathComponent == expected else {
+                throw FrameExportValidationError.missingSequenceNumber(index + 1)
+            }
+            guard let size = fileSystem.fileSize(at: file), size > 0 else {
+                throw FrameExportValidationError.emptyImageFile(file.path)
+            }
+        }
+
+        let sampleFiles = verificationSample(from: files)
+        var dimensions: VideoDimensions?
+        for file in sampleFiles {
+            let frameRequest = FrameExportRequest(
+                inputURL: request.inputURL,
+                outputURL: file,
+                timestampSeconds: request.range.startSeconds,
+                sourceDuration: request.sourceDuration,
+                sourceDimensions: request.sourceDimensions,
+                sourceRotationDegrees: request.sourceRotationDegrees,
+                hasVideoStream: request.hasVideoStream,
+                format: request.format,
+                jpegQuality: request.jpegQuality
+            )
+            let info = try FrameExportOutputValidator.verify(imageURL: file, request: frameRequest)
+            dimensions = info.dimensions
+        }
+
+        let finalDimensions = try dimensions ?? request.expectedDimensions()
+        return IntervalFrameExportResult(
+            imageCount: files.count,
+            dimensions: finalDimensions,
+            firstImageURL: first,
+            lastImageURL: last
+        )
+    }
+
+    private static func verificationSample(from files: [URL]) -> [URL] {
+        guard files.count > fullDecodeThreshold else {
+            return files
+        }
+        let middle = files.count / 2
+        return [files[0], files[middle], files[files.count - 1]]
+    }
+}
+
 public struct FFprobeCompressionOutputVerifier: CompressionOutputVerifying {
     private let ffprobePath: String
 
@@ -560,6 +657,18 @@ public struct NativeFrameExportOutputVerifier: FrameExportOutputVerifying {
     }
 }
 
+public struct NativeIntervalFrameExportOutputVerifier: IntervalFrameExportOutputVerifying {
+    private let fileSystem: EditingFileSystemChecking
+
+    public init(fileSystem: EditingFileSystemChecking = LocalEditingFileSystem()) {
+        self.fileSystem = fileSystem
+    }
+
+    public func verify(request: IntervalFrameExportRequest, files: [URL]) async throws -> IntervalFrameExportResult {
+        try IntervalFrameExportOutputValidator.verify(request: request, files: files, fileSystem: fileSystem)
+    }
+}
+
 public protocol CompressionEncoderChecking: Sendable {
     func supportsLibx264(ffmpegPath: String) async throws -> Bool
 }
@@ -607,6 +716,10 @@ public struct LocalEditingFileSystem: EditingFileSystemChecking {
             return nil
         }
         return size.uint64Value
+    }
+
+    public func contentsOfDirectory(at url: URL) -> [String] {
+        (try? FileManager.default.contentsOfDirectory(atPath: url.path)) ?? []
     }
 
     public func removeFile(at url: URL) {
@@ -1002,6 +1115,41 @@ public final class VideoEditingService: @unchecked Sendable {
         EditingCommand(executablePath: ffmpegPath, arguments: try frameExportArguments(for: request))
     }
 
+    public func intervalFrameExportArguments(for request: IntervalFrameExportRequest) throws -> [String] {
+        try request.validate()
+        let interval = FrameExportTimestamp.compactSeconds(request.interval.seconds)
+        let filter = "setpts=PTS-STARTPTS,fps=1/\(interval):start_time=0"
+        var arguments = [
+            "-y",
+            "-nostdin",
+            "-ss", FrameExportTimestamp.ffmpegSeconds(request.range.startSeconds),
+            "-i", request.inputURL.path,
+            "-t", FrameExportTimestamp.ffmpegSeconds(request.range.duration),
+            "-map", "0:v:0",
+            "-vf", filter,
+            "-start_number", "1"
+        ]
+        if request.format == .jpeg {
+            guard let jpegQuality = request.jpegQuality else {
+                throw FrameExportValidationError.invalidJPEGQuality
+            }
+            arguments += ["-q:v", String(jpegQuality.ffmpegValue)]
+        }
+        arguments += [
+            "-an",
+            "-sn",
+            "-dn",
+            "-progress", "pipe:1",
+            "-nostats",
+            request.outputPattern.path
+        ]
+        return arguments
+    }
+
+    public func intervalFrameExportCommand(ffmpegPath: String, request: IntervalFrameExportRequest) throws -> EditingCommand {
+        EditingCommand(executablePath: ffmpegPath, arguments: try intervalFrameExportArguments(for: request))
+    }
+
     public func requestCancellation(state: EditingOperationState) {
         cancellationFlag.set(true)
         Task { @MainActor in
@@ -1348,6 +1496,94 @@ public final class VideoEditingService: @unchecked Sendable {
         }
     }
 
+    public func runIntervalFrameExport(
+        ffmpegPath: String,
+        request: IntervalFrameExportRequest,
+        state: EditingOperationState,
+        verifier: (any IntervalFrameExportOutputVerifying)? = nil
+    ) async {
+        cancellationFlag.set(false)
+
+        await MainActor.run {
+            state.phase = .starting
+            state.statusText = "Preparing frame export..."
+            state.message = nil
+            state.outputURL = nil
+            state.diagnostics = EditingDiagnostics(ffmpegPath: ffmpegPath, startedAt: Date(), lastActivityAt: Date())
+        }
+
+        var preexistingMatchingFiles: Set<String> = []
+        do {
+            try request.validate()
+            try validateDirectoryPreflight(ffmpegPath: ffmpegPath, inputURL: request.inputURL, outputDirectoryURL: request.outputDirectoryURL)
+            let matchingBefore = IntervalFrameExportOutputValidator.matchingFiles(
+                in: request.outputDirectoryURL,
+                request: request,
+                fileSystem: fileSystem
+            )
+            preexistingMatchingFiles = Set(matchingBefore.map(\.path))
+            if !matchingBefore.isEmpty {
+                guard request.replaceExisting else {
+                    throw FrameExportValidationError.matchingFilesExist(matchingBefore.count)
+                }
+                matchingBefore.forEach { fileSystem.removeFile(at: $0) }
+                preexistingMatchingFiles = []
+            }
+
+            let command = try intervalFrameExportCommand(ffmpegPath: ffmpegPath, request: request)
+            let result = try await executeSequence(
+                command: command,
+                totalDuration: request.range.duration,
+                outputDirectoryURL: request.outputDirectoryURL,
+                state: state,
+                runningStatus: "Exporting frames..."
+            )
+
+            let matchingAfter = IntervalFrameExportOutputValidator.matchingFiles(
+                in: request.outputDirectoryURL,
+                request: request,
+                fileSystem: fileSystem
+            )
+            let createdFiles = matchingAfter.filter { !preexistingMatchingFiles.contains($0.path) }
+            if cancellationFlag.isSet {
+                createdFiles.forEach { fileSystem.removeFile(at: $0) }
+                await MainActor.run {
+                    state.phase = .cancelled
+                    state.statusText = nil
+                    state.message = "Operation cancelled."
+                }
+                return
+            }
+            guard result.exitCode == 0 else {
+                throw VideoEditingError.ffmpegExited(code: result.exitCode)
+            }
+
+            await MainActor.run {
+                state.statusText = "Verifying images..."
+            }
+            let outputVerifier = verifier ?? NativeIntervalFrameExportOutputVerifier(fileSystem: fileSystem)
+            let exportResult = try await outputVerifier.verify(request: request, files: createdFiles)
+            await MainActor.run {
+                state.phase = .completed(outputURL: request.outputDirectoryURL, byteCount: 0)
+                state.statusText = "Frame export complete"
+                state.outputURL = request.outputDirectoryURL
+                state.message = intervalFrameExportSuccessMessage(request: request, result: exportResult)
+            }
+        } catch ProcessExecutionError.launchFailed(let message) {
+            await fail(state: state, error: VideoEditingError.launchFailed(message))
+        } catch {
+            let matchingAfter = IntervalFrameExportOutputValidator.matchingFiles(
+                in: request.outputDirectoryURL,
+                request: request,
+                fileSystem: fileSystem
+            )
+            matchingAfter
+                .filter { !preexistingMatchingFiles.contains($0.path) }
+                .forEach { fileSystem.removeFile(at: $0) }
+            await fail(state: state, error: error)
+        }
+    }
+
     private func validatePreflight(ffmpegPath: String, request: EditingRequest) throws {
         _ = try request.trimPlan()
         try validatePreflight(ffmpegPath: ffmpegPath, inputURL: request.inputURL, outputURL: request.outputURL)
@@ -1372,6 +1608,25 @@ public final class VideoEditingService: @unchecked Sendable {
             throw VideoEditingError.missingFFmpegExecutable(ffmpegPath)
         }
 
+        guard fileSystem.isExecutableFile(at: ffmpegURL) else {
+            throw VideoEditingError.ffmpegNotExecutable(ffmpegPath)
+        }
+    }
+
+    private func validateDirectoryPreflight(ffmpegPath: String, inputURL: URL, outputDirectoryURL: URL) throws {
+        guard fileSystem.fileExists(at: inputURL) else {
+            throw VideoEditingError.inputMissing(inputURL.path)
+        }
+        guard fileSystem.directoryExists(at: outputDirectoryURL) else {
+            throw VideoEditingError.missingOutputDirectory(outputDirectoryURL.path)
+        }
+        guard fileSystem.isWritableDirectory(at: outputDirectoryURL) else {
+            throw VideoEditingError.outputDirectoryNotWritable(outputDirectoryURL.path)
+        }
+        let ffmpegURL = URL(fileURLWithPath: ffmpegPath)
+        guard fileSystem.fileExists(at: ffmpegURL) else {
+            throw VideoEditingError.missingFFmpegExecutable(ffmpegPath)
+        }
         guard fileSystem.isExecutableFile(at: ffmpegURL) else {
             throw VideoEditingError.ffmpegNotExecutable(ffmpegPath)
         }
@@ -1485,6 +1740,19 @@ public final class VideoEditingService: @unchecked Sendable {
         return lines.joined(separator: "\n")
     }
 
+    private func intervalFrameExportSuccessMessage(request: IntervalFrameExportRequest, result: IntervalFrameExportResult) -> String {
+        [
+            "Format: \(request.format.title)",
+            "Interval: \(FrameExportTimestamp.compactSeconds(request.interval.seconds)) seconds",
+            "Range: \(FrameExportTimestamp.displayTime(request.range.startSeconds)) to \(FrameExportTimestamp.displayTime(request.range.endSeconds))",
+            "Images created: \(result.imageCount)",
+            "Dimensions: \(result.dimensions.width)x\(result.dimensions.height)",
+            "",
+            "Saved to:",
+            request.outputDirectoryURL.path
+        ].joined(separator: "\n")
+    }
+
     private func editPlanAppliedLines(plan: VideoEditPlan) -> [String] {
         var lines: [String] = []
         if let trim = plan.trim {
@@ -1596,6 +1864,60 @@ public final class VideoEditingService: @unchecked Sendable {
             state.message = "Saved: \(outputURL.path)"
             state.outputURL = outputURL
         }
+    }
+
+    private func executeSequence(
+        command: EditingCommand,
+        totalDuration: TimeInterval,
+        outputDirectoryURL: URL,
+        state: EditingOperationState,
+        runningStatus: String
+    ) async throws -> ProcessResult {
+        await MainActor.run {
+            state.diagnostics = EditingDiagnostics(
+                ffmpegPath: command.executablePath,
+                arguments: command.arguments,
+                startedAt: Date(),
+                lastActivityAt: Date()
+            )
+            state.message = "Frames will be written to \(outputDirectoryURL.path). Matching files are replaced only after confirmation."
+        }
+
+        let result = try await processExecutor.run(
+            command: command,
+            totalDuration: totalDuration,
+            onStarted: { [cancellationFlag] in
+                Task { @MainActor in
+                    if !cancellationFlag.isSet {
+                        state.phase = .running(progress: nil)
+                        state.statusText = runningStatus
+                    }
+                }
+            },
+            onProgress: { [cancellationFlag] progress in
+                Task { @MainActor in
+                    if !cancellationFlag.isSet {
+                        state.phase = .running(progress: progress)
+                        state.statusText = runningStatus
+                    }
+                }
+            },
+            onActivity: { activity in
+                Task { @MainActor in
+                    state.diagnostics.processIdentifier = activity.processIdentifier
+                    state.diagnostics.lastActivityAt = activity.lastActivityAt
+                    if !activity.stderrTail.isEmpty {
+                        state.diagnostics.stderrTail = activity.stderrTail
+                    }
+                }
+            }
+        )
+
+        await MainActor.run {
+            state.diagnostics.stderr = result.stderrText
+            state.diagnostics.stderrTail = result.stderrText.isEmpty ? state.diagnostics.stderrTail : result.stderrText
+        }
+        return result
     }
 
     @MainActor

@@ -7,6 +7,7 @@ final class FakeEditingProcessExecutor: EditingProcessExecuting, @unchecked Send
     var progressValues: [Double] = []
     var delayNanoseconds: UInt64 = 0
     var waitForCancel = false
+    var onRun: (@Sendable () -> Void)?
     private(set) var command: EditingCommand?
     private(set) var didStart = false
     private(set) var didCancel = false
@@ -26,6 +27,7 @@ final class FakeEditingProcessExecutor: EditingProcessExecuting, @unchecked Send
         didStart = true
         onStarted()
         onActivity(ProcessActivity(processIdentifier: 123, stderrTail: "", lastActivityAt: Date()))
+        onRun?()
         for progress in progressValues {
             onProgress(progress)
         }
@@ -52,6 +54,7 @@ final class FakeEditingFileSystem: EditingFileSystemChecking, @unchecked Sendabl
     var writableDirectories = Set<String>()
     var executables = Set<String>()
     var sizes: [String: UInt64] = [:]
+    var directoryContents: [String: [String]] = [:]
     private(set) var removedFiles: [String] = []
 
     func fileExists(at url: URL) -> Bool {
@@ -74,10 +77,16 @@ final class FakeEditingFileSystem: EditingFileSystemChecking, @unchecked Sendabl
         sizes[url.path]
     }
 
+    func contentsOfDirectory(at url: URL) -> [String] {
+        directoryContents[url.path] ?? []
+    }
+
     func removeFile(at url: URL) {
         removedFiles.append(url.path)
         files.remove(url.path)
         sizes[url.path] = nil
+        let directory = url.deletingLastPathComponent().path
+        directoryContents[directory]?.removeAll { $0 == url.lastPathComponent }
     }
 }
 
@@ -137,6 +146,22 @@ struct FakeFrameExportVerifier: FrameExportOutputVerifying {
             throw error
         }
         return FrameImageInfo(format: request.format, dimensions: (try? request.expectedDimensions()) ?? request.sourceDimensions)
+    }
+}
+
+struct FakeIntervalFrameExportVerifier: IntervalFrameExportOutputVerifying {
+    var error: Error?
+
+    func verify(request: IntervalFrameExportRequest, files: [URL]) async throws -> IntervalFrameExportResult {
+        if let error {
+            throw error
+        }
+        return IntervalFrameExportResult(
+            imageCount: files.count,
+            dimensions: (try? request.expectedDimensions()) ?? request.sourceDimensions,
+            firstImageURL: files.first ?? request.outputURL(forSequenceNumber: 1),
+            lastImageURL: files.last ?? request.outputURL(forSequenceNumber: max(1, files.count))
+        )
     }
 }
 
@@ -732,6 +757,80 @@ final class VideoEditingServiceTests: XCTestCase {
         XCTAssertEqual(fileSystem.removedFiles, [outputURL().path])
     }
 
+    func testIntervalFrameExportSucceedsWithCreatedImages() async {
+        let process = FakeEditingProcessExecutor()
+        let fileSystem = validFileSystem(outputSize: nil)
+        let request = intervalFrameExportRequest()
+        process.onRun = {
+            fileSystem.directoryContents["/tmp"] = [
+                "input-frame-000001.png",
+                "input-frame-000002.png",
+                "input-frame-000003.png"
+            ]
+            for number in 1...3 {
+                let url = request.outputURL(forSequenceNumber: number)
+                fileSystem.files.insert(url.path)
+                fileSystem.sizes[url.path] = 256
+            }
+        }
+        let state = EditingOperationState()
+        let service = VideoEditingService(processExecutor: process, fileSystem: fileSystem)
+
+        await service.runIntervalFrameExport(
+            ffmpegPath: ffmpegPath,
+            request: request,
+            state: state,
+            verifier: FakeIntervalFrameExportVerifier()
+        )
+
+        XCTAssertEqual(state.phase, .completed(outputURL: URL(fileURLWithPath: "/tmp"), byteCount: 0))
+        XCTAssertEqual(state.status, "Frame export complete")
+        XCTAssertEqual(process.command?.arguments.commandValue(after: "-vf"), "setpts=PTS-STARTPTS,fps=1/5:start_time=0")
+    }
+
+    func testIntervalFrameExportCancellationRemovesOnlyNewMatchingFiles() async {
+        let process = FakeEditingProcessExecutor()
+        process.waitForCancel = true
+        let fileSystem = validFileSystem(outputSize: nil)
+        let request = intervalFrameExportRequest()
+        let newFiles = [
+            request.outputURL(forSequenceNumber: 1),
+            request.outputURL(forSequenceNumber: 2)
+        ]
+        process.onRun = {
+            fileSystem.directoryContents["/tmp"] = [
+                "input-frame-000001.png",
+                "input-frame-000002.png",
+                "unrelated.png"
+            ]
+            for url in newFiles {
+                fileSystem.files.insert(url.path)
+                fileSystem.sizes[url.path] = 256
+            }
+            fileSystem.files.insert("/tmp/unrelated.png")
+            fileSystem.sizes["/tmp/unrelated.png"] = 12
+        }
+        let state = EditingOperationState()
+        let service = VideoEditingService(processExecutor: process, fileSystem: fileSystem)
+
+        let task = Task {
+            await service.runIntervalFrameExport(
+                ffmpegPath: ffmpegPath,
+                request: request,
+                state: state,
+                verifier: FakeIntervalFrameExportVerifier()
+            )
+        }
+
+        try? await Task.sleep(nanoseconds: 5_000_000)
+        service.requestCancellation(state: state)
+        await task.value
+
+        XCTAssertEqual(state.phase, .cancelled)
+        XCTAssertEqual(Set(fileSystem.removedFiles), Set(newFiles.map(\.path)))
+        XCTAssertTrue(fileSystem.files.contains("/tmp/unrelated.png"))
+    }
+
     private func runWith(
         process: FakeEditingProcessExecutor = FakeEditingProcessExecutor(),
         fileSystem: FakeEditingFileSystem? = nil,
@@ -753,7 +852,7 @@ final class VideoEditingServiceTests: XCTestCase {
         let fileSystem = FakeEditingFileSystem()
         fileSystem.directories = ["/tmp", "/opt/homebrew/bin"]
         fileSystem.writableDirectories = ["/tmp"]
-        fileSystem.files = [ffmpegPath]
+        fileSystem.files = [ffmpegPath, inputURL().path]
         fileSystem.executables = [ffmpegPath]
         if outputExists {
             fileSystem.files.insert(outputURL().path)
@@ -983,6 +1082,21 @@ final class VideoEditingServiceTests: XCTestCase {
             sourceDimensions: VideoDimensions(width: 1920, height: 1080),
             sourceRotationDegrees: nil,
             hasVideoStream: true,
+            format: .png,
+            jpegQuality: nil
+        )
+    }
+
+    private func intervalFrameExportRequest() -> IntervalFrameExportRequest {
+        IntervalFrameExportRequest(
+            inputURL: inputURL(),
+            outputDirectoryURL: URL(fileURLWithPath: "/tmp"),
+            sourceDuration: 10,
+            sourceDimensions: VideoDimensions(width: 1920, height: 1080),
+            sourceRotationDegrees: nil,
+            hasVideoStream: true,
+            interval: try! FrameInterval(seconds: 5),
+            range: try! FrameExportRange(startSeconds: 0, endSeconds: 10, sourceDuration: 10),
             format: .png,
             jpegQuality: nil
         )

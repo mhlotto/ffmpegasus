@@ -154,6 +154,12 @@ final class EditingOperationController: ObservableObject {
         }
     }
 
+    func exportFramesAtIntervals(ffmpegPath: String, request: IntervalFrameExportRequest, state: EditingOperationState) {
+        Task {
+            await editingService.runIntervalFrameExport(ffmpegPath: ffmpegPath, request: request, state: state)
+        }
+    }
+
     func cancel(state: EditingOperationState) {
         editingService.requestCancellation(state: state)
     }
@@ -194,6 +200,7 @@ struct ContentView: View {
                         onExportPlan: startEditPlanExport,
                         onChangeSpeed: startSpeedChange,
                         onExportFrame: startFrameExport,
+                        onExportFramesAtIntervals: startIntervalFrameExport,
                         currentPlaybackTime: currentPlaybackTime,
                         onCancel: { editingController.cancel(state: operationState) }
                     )
@@ -283,6 +290,10 @@ struct ContentView: View {
 
     private func startFrameExport(_ request: FrameExportRequest) {
         editingController.exportFrame(ffmpegPath: model.ffmpegPath, request: request, state: operationState)
+    }
+
+    private func startIntervalFrameExport(_ request: IntervalFrameExportRequest) {
+        editingController.exportFramesAtIntervals(ffmpegPath: model.ffmpegPath, request: request, state: operationState)
     }
 
     private func currentPlaybackTime() -> TimeInterval {

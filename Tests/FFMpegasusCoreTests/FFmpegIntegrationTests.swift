@@ -654,6 +654,60 @@ final class FFmpegIntegrationTests: XCTestCase {
         ])
     }
 
+    func testOptionalFFmpegSyntheticIntervalFrameExport() async throws {
+        let ffmpegPath = "/opt/homebrew/bin/ffmpeg"
+        guard FileManager.default.isExecutableFile(atPath: ffmpegPath) else {
+            throw XCTSkip("FFmpeg is not available at \(ffmpegPath)")
+        }
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let input = directory.appendingPathComponent("input.mp4")
+        let service = VideoEditingService()
+
+        let generate = try await ProcessRunner().run(
+            executablePath: ffmpegPath,
+            arguments: [
+                "-y", "-nostdin",
+                "-f", "lavfi",
+                "-i", "testsrc2=size=160x120:rate=10:duration=10",
+                "-f", "lavfi",
+                "-i", "sine=frequency=660:duration=10",
+                "-shortest",
+                "-c:v", "libx264",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-b:a", "96k",
+                input.path
+            ]
+        )
+        XCTAssertEqual(generate.exitCode, 0, generate.stderrText)
+
+        let entireDirectory = directory.appendingPathComponent("entire", isDirectory: true)
+        let rangeDirectory = directory.appendingPathComponent("range", isDirectory: true)
+        let fractionalDirectory = directory.appendingPathComponent("fractional", isDirectory: true)
+        let jpegDirectory = directory.appendingPathComponent("jpeg", isDirectory: true)
+        for outputDirectory in [entireDirectory, rangeDirectory, fractionalDirectory, jpegDirectory] {
+            try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+        }
+
+        let entire = try intervalRequest(input: input, outputDirectory: entireDirectory, start: 0, end: 10, interval: 2, format: .png)
+        try await runIntervalFrameExport(service: service, ffmpegPath: ffmpegPath, request: entire)
+
+        let range = try intervalRequest(input: input, outputDirectory: rangeDirectory, start: 2, end: 8, interval: 2, format: .png)
+        try await runIntervalFrameExport(service: service, ffmpegPath: ffmpegPath, request: range)
+
+        let fractional = try intervalRequest(input: input, outputDirectory: fractionalDirectory, start: 0, end: 2, interval: 0.5, format: .png)
+        try await runIntervalFrameExport(service: service, ffmpegPath: ffmpegPath, request: fractional)
+
+        let jpeg = try intervalRequest(input: input, outputDirectory: jpegDirectory, start: 0, end: 2, interval: 1, format: .jpeg)
+        try await runIntervalFrameExport(service: service, ffmpegPath: ffmpegPath, request: jpeg)
+
+        let first = try Data(contentsOf: entire.outputURL(forSequenceNumber: 1))
+        let middle = try Data(contentsOf: entire.outputURL(forSequenceNumber: 3))
+        XCTAssertNotEqual(first, middle)
+    }
+
     private func transformRequest(
         input: URL,
         output: URL,
@@ -764,6 +818,48 @@ final class FFmpegIntegrationTests: XCTestCase {
             format: format,
             jpegQuality: format == .jpeg ? try JPEGQuality(ffmpegValue: 4) : nil
         )
+    }
+
+    private func intervalRequest(
+        input: URL,
+        outputDirectory: URL,
+        start: TimeInterval,
+        end: TimeInterval,
+        interval: TimeInterval,
+        format: FrameImageFormat
+    ) throws -> IntervalFrameExportRequest {
+        IntervalFrameExportRequest(
+            inputURL: input,
+            outputDirectoryURL: outputDirectory,
+            sourceDuration: 10,
+            sourceDimensions: VideoDimensions(width: 160, height: 120),
+            sourceRotationDegrees: nil,
+            hasVideoStream: true,
+            interval: try FrameInterval(seconds: interval),
+            range: try FrameExportRange(startSeconds: start, endSeconds: end, sourceDuration: 10),
+            format: format,
+            jpegQuality: format == .jpeg ? try JPEGQuality(ffmpegValue: 4) : nil,
+            countTolerance: 1
+        )
+    }
+
+    private func runIntervalFrameExport(
+        service: VideoEditingService,
+        ffmpegPath: String,
+        request: IntervalFrameExportRequest
+    ) async throws {
+        let command = try service.intervalFrameExportCommand(ffmpegPath: ffmpegPath, request: request)
+        let result = try await ProcessRunner().run(executablePath: command.executablePath, arguments: command.arguments)
+        XCTAssertEqual(result.exitCode, 0, result.stderrText)
+        let files = IntervalFrameExportOutputValidator.matchingFiles(
+            in: request.outputDirectoryURL,
+            request: request,
+            fileSystem: LocalEditingFileSystem()
+        )
+        let verification = try IntervalFrameExportOutputValidator.verify(request: request, files: files)
+        XCTAssertEqual(verification.dimensions, VideoDimensions(width: 160, height: 120))
+        XCTAssertGreaterThanOrEqual(verification.imageCount, max(1, request.expectedImageCount - request.countTolerance))
+        XCTAssertLessThanOrEqual(verification.imageCount, request.expectedImageCount + request.countTolerance)
     }
 }
 
