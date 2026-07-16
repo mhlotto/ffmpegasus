@@ -2,6 +2,20 @@ import XCTest
 @testable import FFMpegasusCore
 
 final class EditingRequestTests: XCTestCase {
+    func testDefaultTrimExecutionModeIsFast() {
+        let request = EditingRequest(
+            inputURL: URL(fileURLWithPath: "/tmp/input.mov"),
+            outputURL: URL(fileURLWithPath: "/tmp/output.mov"),
+            sourceDuration: 30,
+            removeStartSeconds: 1,
+            removeEndSeconds: 0,
+            mode: .trimStart,
+            method: .streamCopy
+        )
+
+        XCTAssertEqual(request.trimExecutionMode, .fast)
+    }
+
     func testDurationCalculationWithoutTrims() throws {
         let plan = try TrimPlan(sourceDuration: 30, removeStartSeconds: 0, removeEndSeconds: 0)
 
@@ -42,5 +56,12 @@ final class EditingRequestTests: XCTestCase {
         XCTAssertThrowsError(try TrimPlan(sourceDuration: 0, removeStartSeconds: 0, removeEndSeconds: 0)) { error in
             XCTAssertEqual(error as? EditingValidationError, .invalidSourceDuration)
         }
+    }
+
+    func testDecimalAndVeryShortRemainingDurationCalculations() throws {
+        let plan = try TrimPlan(sourceDuration: 3, removeStartSeconds: 1.25, removeEndSeconds: 1.5)
+
+        XCTAssertEqual(plan.startTime, 1.25)
+        XCTAssertEqual(plan.outputDuration, 0.25)
     }
 }

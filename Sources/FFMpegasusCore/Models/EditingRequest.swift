@@ -24,8 +24,22 @@ public struct EditingRequest: Equatable, Sendable {
     public let removeEndSeconds: TimeInterval
     public let mode: EditingMode
     public let method: EditingMethod
+    public let trimExecutionMode: TrimExecutionMode
+    public let hasVideoStream: Bool
+    public let hasAudioStream: Bool
 
-    public init(inputURL: URL, outputURL: URL, sourceDuration: TimeInterval, removeStartSeconds: TimeInterval, removeEndSeconds: TimeInterval, mode: EditingMode, method: EditingMethod) {
+    public init(
+        inputURL: URL,
+        outputURL: URL,
+        sourceDuration: TimeInterval,
+        removeStartSeconds: TimeInterval,
+        removeEndSeconds: TimeInterval,
+        mode: EditingMode,
+        method: EditingMethod,
+        trimExecutionMode: TrimExecutionMode = .fast,
+        hasVideoStream: Bool = true,
+        hasAudioStream: Bool = true
+    ) {
         self.inputURL = inputURL
         self.outputURL = outputURL
         self.sourceDuration = sourceDuration
@@ -33,6 +47,9 @@ public struct EditingRequest: Equatable, Sendable {
         self.removeEndSeconds = removeEndSeconds
         self.mode = mode
         self.method = method
+        self.trimExecutionMode = trimExecutionMode
+        self.hasVideoStream = hasVideoStream
+        self.hasAudioStream = hasAudioStream
     }
 
     public func trimPlan() throws -> TrimPlan {
@@ -48,6 +65,29 @@ public enum EditingMethod: String, CaseIterable, Identifiable, Sendable {
     case streamCopy
 
     public var id: String { rawValue }
+}
+
+public enum TrimExecutionMode: String, CaseIterable, Identifiable, Codable, Sendable {
+    case fast
+    case accurate
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .fast: "Fast"
+        case .accurate: "Accurate"
+        }
+    }
+
+    public var description: String {
+        switch self {
+        case .fast:
+            "Very quick and lossless, but cuts may move to nearby keyframes."
+        case .accurate:
+            "Re-encodes the video for more precise start and end times."
+        }
+    }
 }
 
 public struct TrimPlan: Equatable, Sendable {
@@ -99,5 +139,29 @@ public enum TrimSecondsParser {
             return nil
         }
         return number
+    }
+}
+
+public enum OutputFilename {
+    public static func mutedName(for inputURL: URL) -> String {
+        let base = inputURL.deletingPathExtension().lastPathComponent
+        let ext = inputURL.pathExtension.isEmpty ? "mp4" : inputURL.pathExtension
+        return "\(base)-muted.\(ext)"
+    }
+
+    public static func compressedName(for inputURL: URL) -> String {
+        let base = inputURL.deletingPathExtension().lastPathComponent
+        return "\(base)-compressed.mp4"
+    }
+
+    public static func trimmedName(for inputURL: URL, mode: TrimExecutionMode) -> String {
+        let base = inputURL.deletingPathExtension().lastPathComponent
+        switch mode {
+        case .fast:
+            let ext = inputURL.pathExtension.isEmpty ? "mp4" : inputURL.pathExtension
+            return "\(base)-trimmed.\(ext)"
+        case .accurate:
+            return "\(base)-trimmed-accurate.mp4"
+        }
     }
 }

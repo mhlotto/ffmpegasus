@@ -11,6 +11,22 @@ public struct EditingCommand: Equatable, Sendable {
     }
 }
 
+public struct RemoveAudioRequest: Equatable, Sendable {
+    public let inputURL: URL
+    public let outputURL: URL
+    public let sourceDuration: TimeInterval
+    public let hasVideoStream: Bool
+    public let hasAudioStream: Bool
+
+    public init(inputURL: URL, outputURL: URL, sourceDuration: TimeInterval, hasVideoStream: Bool, hasAudioStream: Bool) {
+        self.inputURL = inputURL
+        self.outputURL = outputURL
+        self.sourceDuration = sourceDuration
+        self.hasVideoStream = hasVideoStream
+        self.hasAudioStream = hasAudioStream
+    }
+}
+
 public struct EditingDiagnostics: Equatable, Sendable {
     public var ffmpegPath: String
     public var arguments: [String]
@@ -83,6 +99,7 @@ public final class EditingOperationState: ObservableObject {
     @Published public var message: String?
     @Published public var outputURL: URL?
     @Published public var diagnostics = EditingDiagnostics()
+    @Published public var statusText: String?
 
     public var isRunning: Bool {
         phase.isActive
@@ -100,7 +117,7 @@ public final class EditingOperationState: ObservableObject {
     }
 
     public var status: String {
-        phase.title
+        statusText ?? phase.title
     }
 
     public init() {}
@@ -116,6 +133,8 @@ public enum VideoEditingError: LocalizedError, Equatable, Sendable {
     case outputMissing(String)
     case outputEmpty(String)
     case launchFailed(String)
+    case missingVideoStream
+    case missingAudioStream
 
     public var errorDescription: String? {
         switch self {
@@ -137,6 +156,10 @@ public enum VideoEditingError: LocalizedError, Equatable, Sendable {
             "FFmpeg exited successfully, but the output file is empty: \(path)"
         case .launchFailed(let message):
             "Could not start FFmpeg: \(message)"
+        case .missingVideoStream:
+            "Input contains no video stream."
+        case .missingAudioStream:
+            "Input contains no audio stream."
         }
     }
 }
@@ -160,6 +183,264 @@ public protocol EditingFileSystemChecking: Sendable {
     func isExecutableFile(at url: URL) -> Bool
     func fileSize(at url: URL) -> UInt64?
     func removeFile(at url: URL)
+}
+
+public protocol CompressionOutputVerifying: Sendable {
+    func verify(request: CompressionRequest, outputURL: URL) async throws
+}
+
+public protocol TrimOutputVerifying: Sendable {
+    func verify(request: EditingRequest, outputURL: URL) async throws
+}
+
+public protocol VideoTransformOutputVerifying: Sendable {
+    func verify(request: VideoTransformRequest, outputURL: URL) async throws
+}
+
+public protocol VideoEditPlanOutputVerifying: Sendable {
+    func verify(plan: VideoEditPlan, outputURL: URL) async throws
+}
+
+public enum TrimOutputValidationError: LocalizedError, Equatable, Sendable {
+    case missingVideoStream
+    case wrongCodec(String?)
+    case invalidDimensions
+    case oddDimensions(VideoDimensions)
+    case missingExpectedAudio
+    case durationMismatch(expected: TimeInterval, actual: TimeInterval, tolerance: TimeInterval)
+
+    public var errorDescription: String? {
+        switch self {
+        case .missingVideoStream:
+            "Trimmed output contains no video stream."
+        case .wrongCodec(let codec):
+            "Accurate Trim output is not H.264. Detected codec: \(codec ?? "unknown")."
+        case .invalidDimensions:
+            "Trimmed output dimensions are unavailable."
+        case .oddDimensions(let dimensions):
+            "Accurate Trim output dimensions must be even. Got \(dimensions.width)x\(dimensions.height)."
+        case .missingExpectedAudio:
+            "Accurate Trim output is missing expected audio."
+        case .durationMismatch(let expected, let actual, let tolerance):
+            String(format: "Trimmed output duration is %.3f seconds, expected %.3f seconds within %.3f seconds.", actual, expected, tolerance)
+        }
+    }
+}
+
+public enum TrimOutputValidator {
+    public static let fastDurationTolerance: TimeInterval = 1.0
+    public static let accurateDurationTolerance: TimeInterval = 0.15
+
+    public static func verify(metadata: VideoMetadata, request: EditingRequest) throws {
+        guard metadata.videoCodec != nil else {
+            throw TrimOutputValidationError.missingVideoStream
+        }
+
+        let expectedDuration = try request.trimPlan().outputDuration
+        let tolerance = request.trimExecutionMode == .accurate ? accurateDurationTolerance : fastDurationTolerance
+        guard abs(metadata.duration - expectedDuration) <= tolerance else {
+            throw TrimOutputValidationError.durationMismatch(
+                expected: expectedDuration,
+                actual: metadata.duration,
+                tolerance: tolerance
+            )
+        }
+
+        guard request.trimExecutionMode == .accurate else { return }
+
+        guard metadata.videoCodec == "h264" else {
+            throw TrimOutputValidationError.wrongCodec(metadata.videoCodec)
+        }
+        guard let width = metadata.width, let height = metadata.height else {
+            throw TrimOutputValidationError.invalidDimensions
+        }
+        let dimensions = VideoDimensions(width: width, height: height)
+        guard width.isMultiple(of: 2), height.isMultiple(of: 2) else {
+            throw TrimOutputValidationError.oddDimensions(dimensions)
+        }
+        if request.hasAudioStream {
+            guard metadata.audioCodec != nil else {
+                throw TrimOutputValidationError.missingExpectedAudio
+            }
+        }
+    }
+}
+
+public enum CompressionOutputValidator {
+    public static func verify(metadata: VideoMetadata, request: CompressionRequest) throws {
+        guard metadata.videoCodec == "h264" else {
+            throw CompressionValidationError.wrongCodec(metadata.videoCodec)
+        }
+        guard let width = metadata.width, let height = metadata.height else {
+            throw CompressionValidationError.invalidSourceDimensions
+        }
+        let actual = VideoDimensions(width: width, height: height)
+        let expected = try request.outputDimensions()
+        guard actual == expected else {
+            throw CompressionValidationError.wrongDimensions(expected: expected, actual: actual)
+        }
+        guard width.isMultiple(of: 2), height.isMultiple(of: 2) else {
+            throw CompressionValidationError.oddDimensions(actual)
+        }
+        if request.audioMode == .remove || !request.hasAudioStream {
+            guard metadata.audioCodec == nil else { throw CompressionValidationError.unexpectedAudio }
+        } else {
+            guard metadata.audioCodec != nil else { throw CompressionValidationError.missingExpectedAudio }
+        }
+        guard abs(metadata.duration - request.sourceDuration) <= max(1.0, request.sourceDuration * 0.05) else {
+            throw CompressionValidationError.durationMismatch
+        }
+    }
+}
+
+public enum VideoTransformOutputValidator {
+    public static let durationTolerance: TimeInterval = 0.15
+
+    public static func verify(metadata: VideoMetadata, request: VideoTransformRequest) throws {
+        guard metadata.videoCodec != nil else {
+            throw VideoTransformValidationError.missingVideoStream
+        }
+        guard metadata.videoCodec == "h264" else {
+            throw VideoTransformValidationError.wrongCodec(metadata.videoCodec)
+        }
+        guard let width = metadata.width, let height = metadata.height else {
+            throw VideoTransformValidationError.invalidSourceDimensions
+        }
+        let actual = VideoDimensions(width: width, height: height)
+        let expected = try request.outputDimensions()
+        guard actual == expected else {
+            throw VideoTransformValidationError.wrongDimensions(expected: expected, actual: actual)
+        }
+        guard width.isMultiple(of: 2), height.isMultiple(of: 2) else {
+            throw VideoTransformValidationError.oddDimensions(actual)
+        }
+        if request.hasAudioStream {
+            guard metadata.audioCodec != nil else { throw VideoTransformValidationError.missingExpectedAudio }
+        } else {
+            guard metadata.audioCodec == nil else { throw VideoTransformValidationError.unexpectedAudio }
+        }
+        guard abs(metadata.duration - request.sourceDuration) <= max(durationTolerance, request.sourceDuration * 0.01) else {
+            throw VideoTransformValidationError.durationMismatch
+        }
+        if let rotation = metadata.rotationDegrees?.normalizedRotationDegrees, rotation != 0 {
+            throw VideoTransformValidationError.staleRotationMetadata(rotation)
+        }
+    }
+}
+
+public enum VideoEditPlanOutputValidator {
+    public static func verify(metadata: VideoMetadata, plan: VideoEditPlan) throws {
+        guard metadata.videoCodec != nil else {
+            throw VideoEditPlanValidationError.missingVideoStream
+        }
+
+        let strategy = try plan.executionStrategy()
+        let expectedDuration = try plan.trimPlan().outputDuration
+        let tolerance: TimeInterval = strategy == .streamCopy ? 1.0 : 0.15
+        guard abs(metadata.duration - expectedDuration) <= tolerance else {
+            throw TrimOutputValidationError.durationMismatch(expected: expectedDuration, actual: metadata.duration, tolerance: tolerance)
+        }
+
+        let expectedDimensions = try plan.outputDimensions()
+        guard let width = metadata.width, let height = metadata.height else {
+            throw VideoTransformValidationError.invalidSourceDimensions
+        }
+        let actualDimensions = VideoDimensions(width: width, height: height)
+        guard actualDimensions == expectedDimensions else {
+            throw VideoTransformValidationError.wrongDimensions(expected: expectedDimensions, actual: actualDimensions)
+        }
+
+        if strategy == .reencode {
+            guard metadata.videoCodec == "h264" else {
+                throw VideoTransformValidationError.wrongCodec(metadata.videoCodec)
+            }
+            guard width.isMultiple(of: 2), height.isMultiple(of: 2) else {
+                throw VideoTransformValidationError.oddDimensions(actualDimensions)
+            }
+        }
+
+        if plan.audioMode == .keep, plan.hasAudioStream {
+            guard metadata.audioCodec != nil else { throw VideoTransformValidationError.missingExpectedAudio }
+        } else {
+            guard metadata.audioCodec == nil else { throw VideoTransformValidationError.unexpectedAudio }
+        }
+
+        if let rotation = metadata.rotationDegrees?.normalizedRotationDegrees, rotation != 0 {
+            throw VideoTransformValidationError.staleRotationMetadata(rotation)
+        }
+    }
+}
+
+public struct FFprobeCompressionOutputVerifier: CompressionOutputVerifying {
+    private let ffprobePath: String
+
+    public init(ffprobePath: String) {
+        self.ffprobePath = ffprobePath
+    }
+
+    public func verify(request: CompressionRequest, outputURL: URL) async throws {
+        let metadata = try await FFprobeRunner().loadMetadata(ffprobePath: ffprobePath, inputURL: outputURL)
+        try CompressionOutputValidator.verify(metadata: metadata, request: request)
+    }
+}
+
+public struct FFprobeTrimOutputVerifier: TrimOutputVerifying {
+    private let ffprobePath: String
+
+    public init(ffprobePath: String) {
+        self.ffprobePath = ffprobePath
+    }
+
+    public func verify(request: EditingRequest, outputURL: URL) async throws {
+        let metadata = try await FFprobeRunner().loadMetadata(ffprobePath: ffprobePath, inputURL: outputURL)
+        try TrimOutputValidator.verify(metadata: metadata, request: request)
+    }
+}
+
+public struct FFprobeVideoTransformOutputVerifier: VideoTransformOutputVerifying {
+    private let ffprobePath: String
+
+    public init(ffprobePath: String) {
+        self.ffprobePath = ffprobePath
+    }
+
+    public func verify(request: VideoTransformRequest, outputURL: URL) async throws {
+        let metadata = try await FFprobeRunner().loadMetadata(ffprobePath: ffprobePath, inputURL: outputURL)
+        try VideoTransformOutputValidator.verify(metadata: metadata, request: request)
+    }
+}
+
+public struct FFprobeVideoEditPlanOutputVerifier: VideoEditPlanOutputVerifying {
+    private let ffprobePath: String
+
+    public init(ffprobePath: String) {
+        self.ffprobePath = ffprobePath
+    }
+
+    public func verify(plan: VideoEditPlan, outputURL: URL) async throws {
+        let metadata = try await FFprobeRunner().loadMetadata(ffprobePath: ffprobePath, inputURL: outputURL)
+        try VideoEditPlanOutputValidator.verify(metadata: metadata, plan: plan)
+    }
+}
+
+public protocol CompressionEncoderChecking: Sendable {
+    func supportsLibx264(ffmpegPath: String) async throws -> Bool
+}
+
+public final class FFmpegCompressionEncoderChecker: CompressionEncoderChecking, @unchecked Sendable {
+    private let libx264Support = LockedValue<[String: Bool]>([:])
+
+    public init() {}
+
+    public func supportsLibx264(ffmpegPath: String) async throws -> Bool {
+        if libx264Support.value[ffmpegPath] == true {
+            return true
+        }
+        let encoders = try await FFmpegRunner().encoders(ffmpegPath: ffmpegPath)
+        let supported = encoders.contains("libx264")
+        libx264Support.update { $0[ffmpegPath] = supported }
+        return supported
+    }
 }
 
 public struct LocalEditingFileSystem: EditingFileSystemChecking {
@@ -257,25 +538,74 @@ public final class VideoEditingService: @unchecked Sendable {
     private let processExecutor: any EditingProcessExecuting
     private let fileSystem: any EditingFileSystemChecking
     private let cancellationFlag = CancellationFlag()
+    private let encoderChecker: any CompressionEncoderChecking
 
     public init(
         processExecutor: any EditingProcessExecuting = FFmpegEditingProcessExecutor(),
-        fileSystem: any EditingFileSystemChecking = LocalEditingFileSystem()
+        fileSystem: any EditingFileSystemChecking = LocalEditingFileSystem(),
+        encoderChecker: any CompressionEncoderChecking = FFmpegCompressionEncoderChecker()
     ) {
         self.processExecutor = processExecutor
         self.fileSystem = fileSystem
+        self.encoderChecker = encoderChecker
     }
 
     public func streamCopyArguments(for request: EditingRequest) throws -> [String] {
         let plan = try request.trimPlan()
-        return [
+        switch request.trimExecutionMode {
+        case .fast:
+            return [
+                "-y",
+                "-nostdin",
+                "-ss", TimeFormatting.ffmpegSeconds(plan.startTime),
+                "-i", request.inputURL.path,
+                "-t", TimeFormatting.ffmpegSeconds(plan.outputDuration),
+                "-map", "0",
+                "-c", "copy",
+                "-progress", "pipe:1",
+                "-nostats",
+                request.outputURL.path
+            ]
+        case .accurate:
+            guard request.hasVideoStream else { throw CompressionValidationError.missingVideoStream }
+            var arguments = [
+                "-y",
+                "-nostdin",
+                "-ss", TimeFormatting.ffmpegSeconds(plan.startTime),
+                "-i", request.inputURL.path,
+                "-t", TimeFormatting.ffmpegSeconds(plan.outputDuration),
+                "-map", "0:v:0"
+            ]
+            if request.hasAudioStream {
+                arguments += ["-map", "0:a:0?"]
+            }
+            arguments += [
+                "-c:v", "libx264",
+                "-preset", "medium",
+                "-crf", "20",
+                "-pix_fmt", "yuv420p"
+            ]
+            if request.hasAudioStream {
+                arguments += ["-c:a", "aac", "-b:a", "128k"]
+            }
+            arguments += [
+                "-movflags", "+faststart",
+                "-progress", "pipe:1",
+                "-nostats",
+                request.outputURL.path
+            ]
+            return arguments
+        }
+    }
+
+    public func removeAudioArguments(for request: RemoveAudioRequest) -> [String] {
+        [
             "-y",
             "-nostdin",
-            "-ss", TimeFormatting.ffmpegSeconds(plan.startTime),
             "-i", request.inputURL.path,
-            "-t", TimeFormatting.ffmpegSeconds(plan.outputDuration),
-            "-map", "0",
-            "-c", "copy",
+            "-map", "0:v",
+            "-c:v", "copy",
+            "-an",
             "-progress", "pipe:1",
             "-nostats",
             request.outputURL.path
@@ -289,6 +619,164 @@ public final class VideoEditingService: @unchecked Sendable {
         }
     }
 
+    public func removeAudioCommand(ffmpegPath: String, request: RemoveAudioRequest) -> EditingCommand {
+        EditingCommand(executablePath: ffmpegPath, arguments: removeAudioArguments(for: request))
+    }
+
+    public func compressionArguments(for request: CompressionRequest) throws -> [String] {
+        let quality = try request.qualitySettings()
+        var arguments = [
+            "-y",
+            "-nostdin",
+            "-i", request.inputURL.path,
+            "-map", "0:v:0"
+        ]
+
+        if request.audioMode == .keep, request.hasAudioStream {
+            arguments += ["-map", "0:a:0?"]
+        }
+
+        if let scaleFilter = try request.scaleFilter() {
+            arguments += ["-vf", scaleFilter]
+        }
+
+        arguments += [
+            "-c:v", "libx264",
+            "-preset", quality.preset.rawValue,
+            "-crf", String(quality.crf),
+            "-pix_fmt", "yuv420p"
+        ]
+
+        if request.audioMode == .keep, request.hasAudioStream {
+            arguments += ["-c:a", "aac", "-b:a", "128k"]
+        } else {
+            arguments += ["-an"]
+        }
+
+        arguments += [
+            "-movflags", "+faststart",
+            "-progress", "pipe:1",
+            "-nostats",
+            request.outputURL.path
+        ]
+        return arguments
+    }
+
+    public func compressionCommand(ffmpegPath: String, request: CompressionRequest) throws -> EditingCommand {
+        EditingCommand(executablePath: ffmpegPath, arguments: try compressionArguments(for: request))
+    }
+
+    public func transformArguments(for request: VideoTransformRequest) throws -> [String] {
+        guard request.hasVideoStream else { throw VideoTransformValidationError.missingVideoStream }
+        let filterChain = try request.filterChain()
+        guard !filterChain.contains("\""), !filterChain.contains("'") else {
+            throw VideoTransformValidationError.invalidFilterChain
+        }
+
+        var arguments = [
+            "-y",
+            "-nostdin",
+            "-i", request.inputURL.path,
+            "-map", "0:v:0"
+        ]
+
+        if request.hasAudioStream {
+            arguments += ["-map", "0:a:0?"]
+        }
+
+        arguments += [
+            "-vf", filterChain,
+            "-c:v", "libx264",
+            "-preset", "medium",
+            "-crf", "20",
+            "-pix_fmt", "yuv420p"
+        ]
+
+        if request.hasAudioStream {
+            arguments += ["-c:a", "aac", "-b:a", "128k"]
+        } else {
+            arguments += ["-an"]
+        }
+
+        arguments += [
+            "-metadata:s:v:0", "rotate=0",
+            "-movflags", "+faststart",
+            "-progress", "pipe:1",
+            "-nostats",
+            request.outputURL.path
+        ]
+
+        return arguments
+    }
+
+    public func transformCommand(ffmpegPath: String, request: VideoTransformRequest) throws -> EditingCommand {
+        EditingCommand(executablePath: ffmpegPath, arguments: try transformArguments(for: request))
+    }
+
+    public func editPlanArguments(for plan: VideoEditPlan) throws -> [String] {
+        try plan.validate()
+        let trimPlan = try plan.trimPlan()
+        let strategy = try plan.executionStrategy()
+        var arguments = ["-y", "-nostdin"]
+
+        if plan.trim != nil {
+            arguments += ["-ss", TimeFormatting.ffmpegSeconds(trimPlan.startTime)]
+        }
+
+        arguments += ["-i", plan.inputURL.path]
+
+        if plan.trim != nil {
+            arguments += ["-t", TimeFormatting.ffmpegSeconds(trimPlan.outputDuration)]
+        }
+
+        switch strategy {
+        case .streamCopy:
+            arguments += ["-map", "0:v:0"]
+            if plan.audioMode == .keep, plan.hasAudioStream {
+                arguments += ["-map", "0:a:0?"]
+                arguments += ["-c", "copy"]
+            } else {
+                arguments += ["-c:v", "copy", "-an"]
+            }
+
+        case .reencode:
+            let quality = try plan.qualitySettings()
+            arguments += ["-map", "0:v:0"]
+            if plan.audioMode == .keep, plan.hasAudioStream {
+                arguments += ["-map", "0:a:0?"]
+            }
+            if let filterChain = try plan.filterChain() {
+                guard !filterChain.contains("\""), !filterChain.contains("'") else {
+                    throw VideoTransformValidationError.invalidFilterChain
+                }
+                arguments += ["-vf", filterChain]
+            }
+            arguments += [
+                "-c:v", "libx264",
+                "-preset", quality.preset.rawValue,
+                "-crf", String(quality.crf),
+                "-pix_fmt", "yuv420p"
+            ]
+            if plan.audioMode == .keep, plan.hasAudioStream {
+                arguments += ["-c:a", "aac", "-b:a", "128k"]
+            } else {
+                arguments += ["-an"]
+            }
+            arguments += ["-metadata:s:v:0", "rotate=0", "-movflags", "+faststart"]
+        }
+
+        arguments += [
+            "-progress", "pipe:1",
+            "-nostats",
+            plan.outputURL.path
+        ]
+        return arguments
+    }
+
+    public func editPlanCommand(ffmpegPath: String, plan: VideoEditPlan) throws -> EditingCommand {
+        EditingCommand(executablePath: ffmpegPath, arguments: try editPlanArguments(for: plan))
+    }
+
     public func requestCancellation(state: EditingOperationState) {
         cancellationFlag.set(true)
         Task { @MainActor in
@@ -298,11 +786,18 @@ public final class VideoEditingService: @unchecked Sendable {
         processExecutor.cancel()
     }
 
-    public func run(ffmpegPath: String, request: EditingRequest, state: EditingOperationState) async {
+    public func run(
+        ffmpegPath: String,
+        ffprobePath: String? = nil,
+        request: EditingRequest,
+        state: EditingOperationState,
+        verifier: (any TrimOutputVerifying)? = nil
+    ) async {
         cancellationFlag.set(false)
 
         await MainActor.run {
             state.phase = .starting
+            state.statusText = "Preparing trim..."
             state.message = nil
             state.outputURL = nil
             state.diagnostics = EditingDiagnostics(ffmpegPath: ffmpegPath, startedAt: Date(), lastActivityAt: Date())
@@ -311,69 +806,219 @@ public final class VideoEditingService: @unchecked Sendable {
         do {
             let command = try command(ffmpegPath: ffmpegPath, request: request)
             try validatePreflight(ffmpegPath: ffmpegPath, request: request)
-
-            await MainActor.run {
-                state.diagnostics = EditingDiagnostics(
-                    ffmpegPath: command.executablePath,
-                    arguments: command.arguments,
-                    startedAt: Date(),
-                    lastActivityAt: Date()
-                )
-                state.message = "Overwrite is enabled for existing output files."
+            if request.trimExecutionMode == .accurate {
+                guard try await encoderChecker.supportsLibx264(ffmpegPath: ffmpegPath) else {
+                    throw CompressionValidationError.missingLibx264
+                }
             }
-
-            let result = try await processExecutor.run(
+            try await execute(
                 command: command,
                 totalDuration: try request.trimPlan().outputDuration,
-                onStarted: { [cancellationFlag] in
-                    Task { @MainActor in
-                        if !cancellationFlag.isSet {
-                            state.phase = .running(progress: nil)
-                        }
-                    }
-                },
-                onProgress: { [cancellationFlag] progress in
-                    Task { @MainActor in
-                        if !cancellationFlag.isSet {
-                            state.phase = .running(progress: progress)
-                        }
-                    }
-                },
-                onActivity: { activity in
-                    Task { @MainActor in
-                        state.diagnostics.processIdentifier = activity.processIdentifier
-                        state.diagnostics.lastActivityAt = activity.lastActivityAt
-                        if !activity.stderrTail.isEmpty {
-                            state.diagnostics.stderrTail = activity.stderrTail
-                        }
-                    }
+                outputURL: request.outputURL,
+                state: state,
+                runningStatus: "Trimming video...",
+                completedStatus: request.trimExecutionMode == .accurate ? "Accurate trim complete" : "Fast trim complete"
+            )
+            let outputVerifier = verifier ?? ffprobePath.map { FFprobeTrimOutputVerifier(ffprobePath: $0) }
+            try await outputVerifier?.verify(request: request, outputURL: request.outputURL)
+            await MainActor.run {
+                if request.trimExecutionMode == .fast {
+                    state.message = (state.message ?? "Saved: \(request.outputURL.path)") + "\n\nThe cut may align to nearby keyframes."
                 }
+            }
+        } catch ProcessExecutionError.launchFailed(let message) {
+            await fail(state: state, error: VideoEditingError.launchFailed(message))
+        } catch {
+            await fail(state: state, error: error)
+        }
+    }
+
+    public func runRemoveAudio(ffmpegPath: String, request: RemoveAudioRequest, state: EditingOperationState) async {
+        cancellationFlag.set(false)
+
+        await MainActor.run {
+            state.phase = .starting
+            state.statusText = "Preparing audio removal..."
+            state.message = nil
+            state.outputURL = nil
+            state.diagnostics = EditingDiagnostics(ffmpegPath: ffmpegPath, startedAt: Date(), lastActivityAt: Date())
+        }
+
+        do {
+            guard request.hasVideoStream else { throw VideoEditingError.missingVideoStream }
+            guard request.hasAudioStream else { throw VideoEditingError.missingAudioStream }
+            let command = removeAudioCommand(ffmpegPath: ffmpegPath, request: request)
+            try validatePreflight(ffmpegPath: ffmpegPath, inputURL: request.inputURL, outputURL: request.outputURL)
+            try await execute(
+                command: command,
+                totalDuration: request.sourceDuration,
+                outputURL: request.outputURL,
+                state: state,
+                runningStatus: "Removing audio...",
+                completedStatus: "Audio removed"
+            )
+        } catch ProcessExecutionError.launchFailed(let message) {
+            await fail(state: state, error: VideoEditingError.launchFailed(message))
+        } catch {
+            await fail(state: state, error: error)
+        }
+    }
+
+    public func runCompression(
+        ffmpegPath: String,
+        ffprobePath: String,
+        request: CompressionRequest,
+        state: EditingOperationState,
+        verifier: (any CompressionOutputVerifying)? = nil
+    ) async {
+        cancellationFlag.set(false)
+
+        await MainActor.run {
+            state.phase = .starting
+            state.statusText = "Preparing compression..."
+            state.message = nil
+            state.outputURL = nil
+            state.diagnostics = EditingDiagnostics(ffmpegPath: ffmpegPath, startedAt: Date(), lastActivityAt: Date())
+        }
+
+        do {
+            guard request.hasVideoStream else { throw CompressionValidationError.missingVideoStream }
+            _ = try request.qualitySettings()
+            _ = try request.outputDimensions()
+            try validatePreflight(ffmpegPath: ffmpegPath, inputURL: request.inputURL, outputURL: request.outputURL)
+
+            await MainActor.run {
+                state.statusText = "Checking encoder..."
+            }
+            try await ensureLibx264(ffmpegPath: ffmpegPath)
+
+            let command = try compressionCommand(ffmpegPath: ffmpegPath, request: request)
+            try await execute(
+                command: command,
+                totalDuration: request.sourceDuration,
+                outputURL: request.outputURL,
+                state: state,
+                runningStatus: "Compressing video...",
+                completedStatus: "Compression complete"
             )
 
+            let outputVerifier = verifier ?? FFprobeCompressionOutputVerifier(ffprobePath: ffprobePath)
+            try await outputVerifier.verify(request: request, outputURL: request.outputURL)
+            let inputSize = fileSystem.fileSize(at: request.inputURL)
+            let outputSize = fileSystem.fileSize(at: request.outputURL)
             await MainActor.run {
-                state.diagnostics.stderr = result.stderrText
-                state.diagnostics.stderrTail = result.stderrText.isEmpty ? state.diagnostics.stderrTail : result.stderrText
+                state.statusText = "Compression complete"
+                state.message = compressionSuccessMessage(inputURL: request.inputURL, outputURL: request.outputURL, inputSize: inputSize, outputSize: outputSize)
+            }
+        } catch ProcessExecutionError.launchFailed(let message) {
+            await fail(state: state, error: VideoEditingError.launchFailed(message))
+        } catch {
+            await fail(state: state, error: error)
+        }
+    }
+
+    public func runTransform(
+        ffmpegPath: String,
+        ffprobePath: String,
+        request: VideoTransformRequest,
+        state: EditingOperationState,
+        verifier: (any VideoTransformOutputVerifying)? = nil
+    ) async {
+        cancellationFlag.set(false)
+
+        await MainActor.run {
+            state.phase = .starting
+            state.statusText = "Preparing transformation..."
+            state.message = nil
+            state.outputURL = nil
+            state.diagnostics = EditingDiagnostics(ffmpegPath: ffmpegPath, startedAt: Date(), lastActivityAt: Date())
+        }
+
+        do {
+            guard request.hasVideoStream else { throw VideoTransformValidationError.missingVideoStream }
+            _ = try request.filterChain()
+            _ = try request.outputDimensions()
+            try validatePreflight(ffmpegPath: ffmpegPath, inputURL: request.inputURL, outputURL: request.outputURL)
+
+            await MainActor.run {
+                state.statusText = "Checking encoder..."
+            }
+            guard try await encoderChecker.supportsLibx264(ffmpegPath: ffmpegPath) else {
+                throw VideoTransformValidationError.missingLibx264
             }
 
-            if cancellationFlag.isSet {
-                fileSystem.removeFile(at: request.outputURL)
+            let command = try transformCommand(ffmpegPath: ffmpegPath, request: request)
+            try await execute(
+                command: command,
+                totalDuration: request.sourceDuration,
+                outputURL: request.outputURL,
+                state: state,
+                runningStatus: "Transforming video...",
+                completedStatus: "Transformation complete"
+            )
+
+            let outputVerifier = verifier ?? FFprobeVideoTransformOutputVerifier(ffprobePath: ffprobePath)
+            try await outputVerifier.verify(request: request, outputURL: request.outputURL)
+            let inputSize = fileSystem.fileSize(at: request.inputURL)
+            let outputSize = fileSystem.fileSize(at: request.outputURL)
+            await MainActor.run {
+                state.statusText = "Transformation complete"
+                state.message = transformSuccessMessage(request: request, inputSize: inputSize, outputSize: outputSize)
+            }
+        } catch ProcessExecutionError.launchFailed(let message) {
+            await fail(state: state, error: VideoEditingError.launchFailed(message))
+        } catch {
+            await fail(state: state, error: error)
+        }
+    }
+
+    public func runEditPlan(
+        ffmpegPath: String,
+        ffprobePath: String,
+        plan: VideoEditPlan,
+        state: EditingOperationState,
+        verifier: (any VideoEditPlanOutputVerifying)? = nil
+    ) async {
+        cancellationFlag.set(false)
+
+        await MainActor.run {
+            state.phase = .starting
+            state.statusText = "Preparing combined export..."
+            state.message = nil
+            state.outputURL = nil
+            state.diagnostics = EditingDiagnostics(ffmpegPath: ffmpegPath, startedAt: Date(), lastActivityAt: Date())
+        }
+
+        do {
+            try plan.validate()
+            try validatePreflight(ffmpegPath: ffmpegPath, inputURL: plan.inputURL, outputURL: plan.outputURL)
+            let strategy = try plan.executionStrategy()
+            if strategy == .reencode {
                 await MainActor.run {
-                    state.phase = .cancelled
-                    state.message = "Operation cancelled."
+                    state.statusText = "Checking encoder..."
                 }
-                return
+                guard try await encoderChecker.supportsLibx264(ffmpegPath: ffmpegPath) else {
+                    throw CompressionValidationError.missingLibx264
+                }
             }
 
-            guard result.exitCode == 0 else {
-                throw VideoEditingError.ffmpegExited(code: result.exitCode)
-            }
+            let command = try editPlanCommand(ffmpegPath: ffmpegPath, plan: plan)
+            try await execute(
+                command: command,
+                totalDuration: try plan.trimPlan().outputDuration,
+                outputURL: plan.outputURL,
+                state: state,
+                runningStatus: "Exporting changes...",
+                completedStatus: "Export complete"
+            )
 
-            let byteCount = try validateSuccessfulOutput(at: request.outputURL)
-
+            let outputVerifier = verifier ?? FFprobeVideoEditPlanOutputVerifier(ffprobePath: ffprobePath)
+            try await outputVerifier.verify(plan: plan, outputURL: plan.outputURL)
+            let inputSize = fileSystem.fileSize(at: plan.inputURL)
+            let outputSize = fileSystem.fileSize(at: plan.outputURL)
             await MainActor.run {
-                state.phase = .completed(outputURL: request.outputURL, byteCount: byteCount)
-                state.message = "Saved: \(request.outputURL.path)"
-                state.outputURL = request.outputURL
+                state.statusText = "Export complete"
+                state.message = editPlanSuccessMessage(plan: plan, inputSize: inputSize, outputSize: outputSize)
             }
         } catch ProcessExecutionError.launchFailed(let message) {
             await fail(state: state, error: VideoEditingError.launchFailed(message))
@@ -384,12 +1029,15 @@ public final class VideoEditingService: @unchecked Sendable {
 
     private func validatePreflight(ffmpegPath: String, request: EditingRequest) throws {
         _ = try request.trimPlan()
+        try validatePreflight(ffmpegPath: ffmpegPath, inputURL: request.inputURL, outputURL: request.outputURL)
+    }
 
-        if request.inputURL.standardizedFileURL == request.outputURL.standardizedFileURL {
+    private func validatePreflight(ffmpegPath: String, inputURL: URL, outputURL: URL) throws {
+        if inputURL.standardizedFileURL == outputURL.standardizedFileURL {
             throw VideoEditingError.outputMatchesInput
         }
 
-        let outputDirectory = request.outputURL.deletingLastPathComponent()
+        let outputDirectory = outputURL.deletingLastPathComponent()
         guard fileSystem.directoryExists(at: outputDirectory) else {
             throw VideoEditingError.missingOutputDirectory(outputDirectory.path)
         }
@@ -420,9 +1068,183 @@ public final class VideoEditingService: @unchecked Sendable {
         return size
     }
 
+    private func ensureLibx264(ffmpegPath: String) async throws {
+        guard try await encoderChecker.supportsLibx264(ffmpegPath: ffmpegPath) else {
+            throw CompressionValidationError.missingLibx264
+        }
+    }
+
+    private func compressionSuccessMessage(inputURL: URL, outputURL: URL, inputSize: UInt64?, outputSize: UInt64?) -> String {
+        var lines: [String] = []
+        if let inputSize, let outputSize, inputSize > 0 {
+            lines.append("Original size: \(ByteCountFormatter.string(fromByteCount: Int64(inputSize), countStyle: .file))")
+            lines.append("Output size: \(ByteCountFormatter.string(fromByteCount: Int64(outputSize), countStyle: .file))")
+            let delta = (Double(inputSize) - Double(outputSize)) / Double(inputSize) * 100
+            if delta >= 0 {
+                lines.append(String(format: "Reduced by: %.1f%%", delta))
+            } else {
+                lines.append(String(format: "Output is %.1f%% larger than the original.", abs(delta)))
+            }
+        }
+        lines.append("Saved: \(outputURL.path)")
+        return lines.joined(separator: "\n")
+    }
+
+    private func transformSuccessMessage(request: VideoTransformRequest, inputSize: UInt64?, outputSize: UInt64?) -> String {
+        var lines = [
+            "Rotation: \(request.rotation.title)",
+            "Horizontal flip: \(request.flipHorizontal ? "Yes" : "No")",
+            "Vertical flip: \(request.flipVertical ? "Yes" : "No")"
+        ]
+        if let dimensions = try? request.outputDimensions() {
+            lines.append("Output: \(dimensions.width)x\(dimensions.height)")
+        }
+        if let inputSize, let outputSize, inputSize > 0 {
+            lines.append("Original size: \(ByteCountFormatter.string(fromByteCount: Int64(inputSize), countStyle: .file))")
+            lines.append("Output size: \(ByteCountFormatter.string(fromByteCount: Int64(outputSize), countStyle: .file))")
+        }
+        lines.append("Saved: \(request.outputURL.path)")
+        return lines.joined(separator: "\n")
+    }
+
+    private func editPlanSuccessMessage(plan: VideoEditPlan, inputSize: UInt64?, outputSize: UInt64?) -> String {
+        var lines = ["Applied:"]
+        lines += editPlanAppliedLines(plan: plan).map { "- \($0)" }
+        if let dimensions = try? plan.outputDimensions() {
+            lines.append("")
+            lines.append("Output:")
+            lines.append("\(dimensions.width)x\(dimensions.height)")
+        }
+        if (try? plan.executionStrategy()) == .reencode {
+            lines.append("H.264")
+        }
+        if let duration = try? plan.trimPlan().outputDuration {
+            lines.append(String(format: "Duration: %.1f seconds", duration))
+        }
+        if let inputSize, let outputSize, inputSize > 0 {
+            lines.append("Original size: \(ByteCountFormatter.string(fromByteCount: Int64(inputSize), countStyle: .file))")
+            lines.append("Output size: \(ByteCountFormatter.string(fromByteCount: Int64(outputSize), countStyle: .file))")
+        }
+        lines.append("")
+        lines.append("Saved:")
+        lines.append(plan.outputURL.path)
+        return lines.joined(separator: "\n")
+    }
+
+    private func editPlanAppliedLines(plan: VideoEditPlan) -> [String] {
+        var lines: [String] = []
+        if let trim = plan.trim {
+            if trim.removeStartSeconds > 0 {
+                lines.append(String(format: "Removed first %.3g seconds", trim.removeStartSeconds))
+            }
+            if trim.removeEndSeconds > 0 {
+                lines.append(String(format: "Removed last %.3g seconds", trim.removeEndSeconds))
+            }
+        }
+        if let transform = plan.transform {
+            if transform.rotation != .none {
+                lines.append("Rotated \(transform.rotation.title)")
+            }
+            if transform.flipHorizontal {
+                lines.append("Flipped horizontally")
+            }
+            if transform.flipVertical {
+                lines.append("Flipped vertically")
+            }
+        }
+        if let resize = plan.resize {
+            lines.append("Resized to \(resize.resolution.title)")
+        }
+        if let compression = plan.compression {
+            lines.append("Compressed with \(compression.quality.title)")
+        }
+        if plan.audioMode == .remove {
+            lines.append("Removed audio")
+        }
+        return lines.isEmpty ? ["No changes"] : lines
+    }
+
+    private func execute(
+        command: EditingCommand,
+        totalDuration: TimeInterval,
+        outputURL: URL,
+        state: EditingOperationState,
+        runningStatus: String,
+        completedStatus: String
+    ) async throws {
+        await MainActor.run {
+            state.diagnostics = EditingDiagnostics(
+                ffmpegPath: command.executablePath,
+                arguments: command.arguments,
+                startedAt: Date(),
+                lastActivityAt: Date()
+            )
+            state.message = "Overwrite is enabled for existing output files."
+        }
+
+        let result = try await processExecutor.run(
+            command: command,
+            totalDuration: totalDuration,
+            onStarted: { [cancellationFlag] in
+                Task { @MainActor in
+                    if !cancellationFlag.isSet {
+                        state.phase = .running(progress: nil)
+                        state.statusText = runningStatus
+                    }
+                }
+            },
+            onProgress: { [cancellationFlag] progress in
+                Task { @MainActor in
+                    if !cancellationFlag.isSet {
+                        state.phase = .running(progress: progress)
+                        state.statusText = runningStatus
+                    }
+                }
+            },
+            onActivity: { activity in
+                Task { @MainActor in
+                    state.diagnostics.processIdentifier = activity.processIdentifier
+                    state.diagnostics.lastActivityAt = activity.lastActivityAt
+                    if !activity.stderrTail.isEmpty {
+                        state.diagnostics.stderrTail = activity.stderrTail
+                    }
+                }
+            }
+        )
+
+        await MainActor.run {
+            state.diagnostics.stderr = result.stderrText
+            state.diagnostics.stderrTail = result.stderrText.isEmpty ? state.diagnostics.stderrTail : result.stderrText
+        }
+
+        if cancellationFlag.isSet {
+            fileSystem.removeFile(at: outputURL)
+            await MainActor.run {
+                state.phase = .cancelled
+                state.statusText = nil
+                state.message = "Operation cancelled."
+            }
+            return
+        }
+
+        guard result.exitCode == 0 else {
+            throw VideoEditingError.ffmpegExited(code: result.exitCode)
+        }
+
+        let byteCount = try validateSuccessfulOutput(at: outputURL)
+
+        await MainActor.run {
+            state.phase = .completed(outputURL: outputURL, byteCount: byteCount)
+            state.statusText = completedStatus
+            state.message = "Saved: \(outputURL.path)"
+            state.outputURL = outputURL
+        }
+    }
+
     @MainActor
     private func fail(state: EditingOperationState, error: Error) {
         state.phase = .failed(summary: error.localizedDescription)
+        state.statusText = nil
         state.message = error.localizedDescription
     }
 }

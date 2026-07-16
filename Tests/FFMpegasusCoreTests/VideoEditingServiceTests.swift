@@ -81,6 +81,44 @@ final class FakeEditingFileSystem: EditingFileSystemChecking, @unchecked Sendabl
     }
 }
 
+struct FakeEncoderChecker: CompressionEncoderChecking {
+    var supports = true
+
+    func supportsLibx264(ffmpegPath: String) async throws -> Bool {
+        supports
+    }
+}
+
+struct FakeCompressionVerifier: CompressionOutputVerifying {
+    var error: Error?
+
+    func verify(request: CompressionRequest, outputURL: URL) async throws {
+        if let error {
+            throw error
+        }
+    }
+}
+
+struct FakeTransformVerifier: VideoTransformOutputVerifying {
+    var error: Error?
+
+    func verify(request: VideoTransformRequest, outputURL: URL) async throws {
+        if let error {
+            throw error
+        }
+    }
+}
+
+struct FakeEditPlanVerifier: VideoEditPlanOutputVerifying {
+    var error: Error?
+
+    func verify(plan: VideoEditPlan, outputURL: URL) async throws {
+        if let error {
+            throw error
+        }
+    }
+}
+
 @MainActor
 final class VideoEditingServiceTests: XCTestCase {
     private let ffmpegPath = "/opt/homebrew/bin/ffmpeg"
@@ -199,6 +237,307 @@ final class VideoEditingServiceTests: XCTestCase {
         XCTAssertTrue(summary.contains("not writable"))
     }
 
+    func testRemoveAudioSucceedsWithValidNonemptyOutput() async {
+        let process = FakeEditingProcessExecutor()
+        let fileSystem = validFileSystem(outputSize: 2048)
+        let state = EditingOperationState()
+        let service = VideoEditingService(processExecutor: process, fileSystem: fileSystem)
+
+        await service.runRemoveAudio(ffmpegPath: ffmpegPath, request: removeAudioRequest(), state: state)
+
+        XCTAssertEqual(state.phase, .completed(outputURL: outputURL(), byteCount: 2048))
+        XCTAssertEqual(state.status, "Audio removed")
+        XCTAssertEqual(process.command?.arguments.commandValue(after: "-map"), "0:v")
+    }
+
+    func testRemoveAudioRejectsMissingVideoStream() async {
+        let state = await runRemoveAudioWith(request: removeAudioRequest(hasVideoStream: false))
+
+        guard case .failed(let summary) = state.phase else {
+            return XCTFail("Expected failed state")
+        }
+        XCTAssertTrue(summary.contains("no video stream"))
+    }
+
+    func testRemoveAudioRejectsMissingAudioStream() async {
+        let state = await runRemoveAudioWith(request: removeAudioRequest(hasAudioStream: false))
+
+        guard case .failed(let summary) = state.phase else {
+            return XCTFail("Expected failed state")
+        }
+        XCTAssertTrue(summary.contains("no audio stream"))
+    }
+
+    func testRemoveAudioRejectsInputAndOutputPathsBeingIdentical() async {
+        let state = await runRemoveAudioWith(request: removeAudioRequest(outputURL: inputURL()))
+
+        guard case .failed(let summary) = state.phase else {
+            return XCTFail("Expected failed state")
+        }
+        XCTAssertTrue(summary.contains("different from the input"))
+    }
+
+    func testRemoveAudioExitZeroWithMissingOutputFails() async {
+        let state = await runRemoveAudioWith(outputExists: false, outputSize: nil)
+
+        guard case .failed(let summary) = state.phase else {
+            return XCTFail("Expected failed state")
+        }
+        XCTAssertTrue(summary.contains("no output file was created"))
+    }
+
+    func testRemoveAudioExitZeroWithZeroByteOutputFails() async {
+        let state = await runRemoveAudioWith(outputExists: true, outputSize: 0)
+
+        guard case .failed(let summary) = state.phase else {
+            return XCTFail("Expected failed state")
+        }
+        XCTAssertTrue(summary.contains("output file is empty"))
+    }
+
+    func testRemoveAudioCancellationRemovesIncompleteOutput() async {
+        let process = FakeEditingProcessExecutor()
+        process.waitForCancel = true
+        let fileSystem = validFileSystem(outputSize: 12)
+        let state = EditingOperationState()
+        let service = VideoEditingService(processExecutor: process, fileSystem: fileSystem)
+
+        let task = Task {
+            await service.runRemoveAudio(ffmpegPath: ffmpegPath, request: removeAudioRequest(), state: state)
+        }
+
+        try? await Task.sleep(nanoseconds: 5_000_000)
+        service.requestCancellation(state: state)
+        await task.value
+
+        XCTAssertEqual(state.phase, .cancelled)
+        XCTAssertEqual(fileSystem.removedFiles, [outputURL().path])
+    }
+
+    func testCompressionSucceedsWithValidOutput() async {
+        let process = FakeEditingProcessExecutor()
+        let fileSystem = validFileSystem(outputSize: 4096)
+        fileSystem.files.insert(inputURL().path)
+        fileSystem.sizes[inputURL().path] = 10_000
+        let state = EditingOperationState()
+        let service = VideoEditingService(processExecutor: process, fileSystem: fileSystem, encoderChecker: FakeEncoderChecker())
+
+        await service.runCompression(
+            ffmpegPath: ffmpegPath,
+            ffprobePath: "/opt/homebrew/bin/ffprobe",
+            request: compressionRequest(),
+            state: state,
+            verifier: FakeCompressionVerifier()
+        )
+
+        XCTAssertEqual(state.phase, .completed(outputURL: outputURL(), byteCount: 4096))
+        XCTAssertTrue(state.message?.contains("Output size") == true)
+    }
+
+    func testCompressionMissingLibx264Fails() async {
+        let state = await runCompressionWith(encoderChecker: FakeEncoderChecker(supports: false))
+
+        guard case .failed(let summary) = state.phase else {
+            return XCTFail("Expected failed state")
+        }
+        XCTAssertTrue(summary.contains("libx264"))
+    }
+
+    func testAccurateTrimMissingLibx264Fails() async {
+        let state = EditingOperationState()
+        let service = VideoEditingService(
+            processExecutor: FakeEditingProcessExecutor(),
+            fileSystem: validFileSystem(outputSize: 100),
+            encoderChecker: FakeEncoderChecker(supports: false)
+        )
+        await service.run(ffmpegPath: ffmpegPath, request: request(trimExecutionMode: .accurate), state: state)
+
+        guard case .failed(let summary) = state.phase else {
+            return XCTFail("Expected failed state")
+        }
+        XCTAssertTrue(summary.contains("libx264"))
+    }
+
+    func testCompressionOutputVerificationFailureFails() async {
+        let state = await runCompressionWith(verifier: FakeCompressionVerifier(error: CompressionValidationError.wrongCodec("hevc")))
+
+        guard case .failed(let summary) = state.phase else {
+            return XCTFail("Expected failed state")
+        }
+        XCTAssertTrue(summary.contains("not H.264"))
+    }
+
+    func testCompressionCancellationRemovesIncompleteOutput() async {
+        let process = FakeEditingProcessExecutor()
+        process.waitForCancel = true
+        let fileSystem = validFileSystem(outputSize: 12)
+        let state = EditingOperationState()
+        let service = VideoEditingService(processExecutor: process, fileSystem: fileSystem, encoderChecker: FakeEncoderChecker())
+
+        let task = Task {
+            await service.runCompression(
+                ffmpegPath: ffmpegPath,
+                ffprobePath: "/opt/homebrew/bin/ffprobe",
+                request: compressionRequest(),
+                state: state,
+                verifier: FakeCompressionVerifier()
+            )
+        }
+
+        try? await Task.sleep(nanoseconds: 5_000_000)
+        service.requestCancellation(state: state)
+        await task.value
+
+        XCTAssertEqual(state.phase, .cancelled)
+        XCTAssertEqual(fileSystem.removedFiles, [outputURL().path])
+    }
+
+    func testTransformSucceedsWithValidOutput() async {
+        let process = FakeEditingProcessExecutor()
+        let fileSystem = validFileSystem(outputSize: 4096)
+        fileSystem.files.insert(inputURL().path)
+        fileSystem.sizes[inputURL().path] = 10_000
+        let state = EditingOperationState()
+        let service = VideoEditingService(processExecutor: process, fileSystem: fileSystem, encoderChecker: FakeEncoderChecker())
+
+        await service.runTransform(
+            ffmpegPath: ffmpegPath,
+            ffprobePath: "/opt/homebrew/bin/ffprobe",
+            request: transformRequest(),
+            state: state,
+            verifier: FakeTransformVerifier()
+        )
+
+        XCTAssertEqual(state.phase, .completed(outputURL: outputURL(), byteCount: 4096))
+        XCTAssertEqual(state.status, "Transformation complete")
+        XCTAssertEqual(process.command?.arguments.commandValue(after: "-vf"), "transpose=clock")
+    }
+
+    func testTransformMissingLibx264Fails() async {
+        let state = await runTransformWith(encoderChecker: FakeEncoderChecker(supports: false))
+
+        guard case .failed(let summary) = state.phase else {
+            return XCTFail("Expected failed state")
+        }
+        XCTAssertTrue(summary.contains("Rotate / Flip requires"))
+    }
+
+    func testTransformOutputVerificationFailureFails() async {
+        let state = await runTransformWith(verifier: FakeTransformVerifier(error: VideoTransformValidationError.wrongCodec("hevc")))
+
+        guard case .failed(let summary) = state.phase else {
+            return XCTFail("Expected failed state")
+        }
+        XCTAssertTrue(summary.contains("not H.264"))
+    }
+
+    func testTransformRejectsInputAndOutputPathsBeingIdentical() async {
+        let state = await runTransformWith(request: transformRequest(outputURL: inputURL()))
+
+        guard case .failed(let summary) = state.phase else {
+            return XCTFail("Expected failed state")
+        }
+        XCTAssertTrue(summary.contains("different from the input"))
+    }
+
+    func testTransformCancellationRemovesIncompleteOutput() async {
+        let process = FakeEditingProcessExecutor()
+        process.waitForCancel = true
+        let fileSystem = validFileSystem(outputSize: 12)
+        let state = EditingOperationState()
+        let service = VideoEditingService(processExecutor: process, fileSystem: fileSystem, encoderChecker: FakeEncoderChecker())
+
+        let task = Task {
+            await service.runTransform(
+                ffmpegPath: ffmpegPath,
+                ffprobePath: "/opt/homebrew/bin/ffprobe",
+                request: transformRequest(),
+                state: state,
+                verifier: FakeTransformVerifier()
+            )
+        }
+
+        try? await Task.sleep(nanoseconds: 5_000_000)
+        service.requestCancellation(state: state)
+        await task.value
+
+        XCTAssertEqual(state.phase, .cancelled)
+        XCTAssertEqual(fileSystem.removedFiles, [outputURL().path])
+    }
+
+    func testEditPlanSucceedsWithValidOutput() async {
+        let process = FakeEditingProcessExecutor()
+        let fileSystem = validFileSystem(outputSize: 4096)
+        fileSystem.files.insert(inputURL().path)
+        fileSystem.sizes[inputURL().path] = 10_000
+        let state = EditingOperationState()
+        let service = VideoEditingService(processExecutor: process, fileSystem: fileSystem, encoderChecker: FakeEncoderChecker())
+
+        await service.runEditPlan(
+            ffmpegPath: ffmpegPath,
+            ffprobePath: "/opt/homebrew/bin/ffprobe",
+            plan: editPlan(),
+            state: state,
+            verifier: FakeEditPlanVerifier()
+        )
+
+        XCTAssertEqual(state.phase, .completed(outputURL: outputURL(), byteCount: 4096))
+        XCTAssertEqual(state.status, "Export complete")
+        XCTAssertEqual(process.command?.arguments.commandValue(after: "-vf"), "transpose=clock")
+    }
+
+    func testEditPlanMissingLibx264FailsWhenReencoding() async {
+        let state = await runEditPlanWith(encoderChecker: FakeEncoderChecker(supports: false))
+
+        guard case .failed(let summary) = state.phase else {
+            return XCTFail("Expected failed state")
+        }
+        XCTAssertTrue(summary.contains("libx264"))
+    }
+
+    func testEditPlanVerificationFailureFails() async {
+        let state = await runEditPlanWith(verifier: FakeEditPlanVerifier(error: VideoTransformValidationError.wrongCodec("hevc")))
+
+        guard case .failed(let summary) = state.phase else {
+            return XCTFail("Expected failed state")
+        }
+        XCTAssertTrue(summary.contains("not H.264"))
+    }
+
+    func testEditPlanRejectsInputAndOutputPathsBeingIdentical() async {
+        let state = await runEditPlanWith(plan: editPlan(outputURL: inputURL()))
+
+        guard case .failed(let summary) = state.phase else {
+            return XCTFail("Expected failed state")
+        }
+        XCTAssertTrue(summary.contains("different from the input"))
+    }
+
+    func testEditPlanCancellationRemovesIncompleteOutput() async {
+        let process = FakeEditingProcessExecutor()
+        process.waitForCancel = true
+        let fileSystem = validFileSystem(outputSize: 12)
+        let state = EditingOperationState()
+        let service = VideoEditingService(processExecutor: process, fileSystem: fileSystem, encoderChecker: FakeEncoderChecker())
+
+        let task = Task {
+            await service.runEditPlan(
+                ffmpegPath: ffmpegPath,
+                ffprobePath: "/opt/homebrew/bin/ffprobe",
+                plan: editPlan(),
+                state: state,
+                verifier: FakeEditPlanVerifier()
+            )
+        }
+
+        try? await Task.sleep(nanoseconds: 5_000_000)
+        service.requestCancellation(state: state)
+        await task.value
+
+        XCTAssertEqual(state.phase, .cancelled)
+        XCTAssertEqual(fileSystem.removedFiles, [outputURL().path])
+    }
+
     func testRejectsNonExecutableFFmpegPath() async {
         let fileSystem = validFileSystem(outputSize: 100)
         fileSystem.executables.remove(ffmpegPath)
@@ -242,7 +581,7 @@ final class VideoEditingServiceTests: XCTestCase {
         return fileSystem
     }
 
-    private func request(outputURL: URL? = nil) -> EditingRequest {
+    private func request(outputURL: URL? = nil, trimExecutionMode: TrimExecutionMode = .fast) -> EditingRequest {
         EditingRequest(
             inputURL: inputURL(),
             outputURL: outputURL ?? self.outputURL(),
@@ -250,7 +589,149 @@ final class VideoEditingServiceTests: XCTestCase {
             removeStartSeconds: 10,
             removeEndSeconds: 15,
             mode: .trimBoth,
-            method: .streamCopy
+            method: .streamCopy,
+            trimExecutionMode: trimExecutionMode
+        )
+    }
+
+    private func runRemoveAudioWith(
+        process: FakeEditingProcessExecutor = FakeEditingProcessExecutor(),
+        fileSystem: FakeEditingFileSystem? = nil,
+        request: RemoveAudioRequest? = nil,
+        outputExists: Bool = true,
+        outputSize: UInt64? = 100
+    ) async -> EditingOperationState {
+        let state = EditingOperationState()
+        let service = VideoEditingService(
+            processExecutor: process,
+            fileSystem: fileSystem ?? validFileSystem(outputExists: outputExists, outputSize: outputSize)
+        )
+        await service.runRemoveAudio(ffmpegPath: ffmpegPath, request: request ?? removeAudioRequest(), state: state)
+        return state
+    }
+
+    private func removeAudioRequest(
+        outputURL: URL? = nil,
+        hasVideoStream: Bool = true,
+        hasAudioStream: Bool = true
+    ) -> RemoveAudioRequest {
+        RemoveAudioRequest(
+            inputURL: inputURL(),
+            outputURL: outputURL ?? self.outputURL(),
+            sourceDuration: 100,
+            hasVideoStream: hasVideoStream,
+            hasAudioStream: hasAudioStream
+        )
+    }
+
+    private func runCompressionWith(
+        encoderChecker: FakeEncoderChecker = FakeEncoderChecker(),
+        verifier: FakeCompressionVerifier = FakeCompressionVerifier()
+    ) async -> EditingOperationState {
+        let state = EditingOperationState()
+        let service = VideoEditingService(
+            processExecutor: FakeEditingProcessExecutor(),
+            fileSystem: validFileSystem(outputSize: 100),
+            encoderChecker: encoderChecker
+        )
+        await service.runCompression(
+            ffmpegPath: ffmpegPath,
+            ffprobePath: "/opt/homebrew/bin/ffprobe",
+            request: compressionRequest(),
+            state: state,
+            verifier: verifier
+        )
+        return state
+    }
+
+    private func runTransformWith(
+        encoderChecker: FakeEncoderChecker = FakeEncoderChecker(),
+        verifier: FakeTransformVerifier = FakeTransformVerifier(),
+        request: VideoTransformRequest? = nil
+    ) async -> EditingOperationState {
+        let state = EditingOperationState()
+        let service = VideoEditingService(
+            processExecutor: FakeEditingProcessExecutor(),
+            fileSystem: validFileSystem(outputSize: 100),
+            encoderChecker: encoderChecker
+        )
+        await service.runTransform(
+            ffmpegPath: ffmpegPath,
+            ffprobePath: "/opt/homebrew/bin/ffprobe",
+            request: request ?? transformRequest(),
+            state: state,
+            verifier: verifier
+        )
+        return state
+    }
+
+    private func runEditPlanWith(
+        encoderChecker: FakeEncoderChecker = FakeEncoderChecker(),
+        verifier: FakeEditPlanVerifier = FakeEditPlanVerifier(),
+        plan: VideoEditPlan? = nil
+    ) async -> EditingOperationState {
+        let state = EditingOperationState()
+        let service = VideoEditingService(
+            processExecutor: FakeEditingProcessExecutor(),
+            fileSystem: validFileSystem(outputSize: 100),
+            encoderChecker: encoderChecker
+        )
+        await service.runEditPlan(
+            ffmpegPath: ffmpegPath,
+            ffprobePath: "/opt/homebrew/bin/ffprobe",
+            plan: plan ?? editPlan(),
+            state: state,
+            verifier: verifier
+        )
+        return state
+    }
+
+    private func compressionRequest() -> CompressionRequest {
+        CompressionRequest(
+            inputURL: inputURL(),
+            outputURL: outputURL(),
+            sourceDuration: 100,
+            sourceDimensions: VideoDimensions(width: 1920, height: 1080),
+            hasVideoStream: true,
+            hasAudioStream: true,
+            quality: .balanced,
+            customCRF: 24,
+            encoderPreset: .medium,
+            resolution: .p720,
+            customHeight: nil,
+            audioMode: .keep
+        )
+    }
+
+    private func transformRequest(outputURL: URL? = nil) -> VideoTransformRequest {
+        VideoTransformRequest(
+            inputURL: inputURL(),
+            outputURL: outputURL ?? self.outputURL(),
+            sourceDuration: 100,
+            sourceDimensions: VideoDimensions(width: 1920, height: 1080),
+            sourceRotationDegrees: nil,
+            hasVideoStream: true,
+            hasAudioStream: true,
+            rotation: .clockwise90,
+            flipHorizontal: false,
+            flipVertical: false
+        )
+    }
+
+    private func editPlan(outputURL: URL? = nil) -> VideoEditPlan {
+        VideoEditPlan(
+            inputURL: inputURL(),
+            outputURL: outputURL ?? self.outputURL(),
+            sourceDuration: 100,
+            sourceDimensions: VideoDimensions(width: 1920, height: 1080),
+            sourceRotationDegrees: nil,
+            hasVideoStream: true,
+            hasAudioStream: true,
+            trim: nil,
+            transform: VideoTransformConfiguration(rotation: .clockwise90, flipHorizontal: false, flipVertical: false),
+            resize: nil,
+            compression: nil,
+            audioMode: .keep
         )
     }
 
@@ -260,5 +741,12 @@ final class VideoEditingServiceTests: XCTestCase {
 
     private func outputURL() -> URL {
         URL(fileURLWithPath: "/tmp/output.mov")
+    }
+}
+
+private extension Array where Element == String {
+    func commandValue(after option: String) -> String? {
+        guard let index = firstIndex(of: option), indices.contains(index + 1) else { return nil }
+        return self[index + 1]
     }
 }

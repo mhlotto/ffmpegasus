@@ -7,6 +7,19 @@ public struct VideoMetadata: Equatable, Sendable {
     public let videoCodec: String?
     public let audioCodec: String?
     public let frameRate: Double?
+    public let pixelFormat: String?
+    public let rotationDegrees: Int?
+
+    public init(duration: TimeInterval, width: Int?, height: Int?, videoCodec: String?, audioCodec: String?, frameRate: Double?, pixelFormat: String? = nil, rotationDegrees: Int? = nil) {
+        self.duration = duration
+        self.width = width
+        self.height = height
+        self.videoCodec = videoCodec
+        self.audioCodec = audioCodec
+        self.frameRate = frameRate
+        self.pixelFormat = pixelFormat
+        self.rotationDegrees = rotationDegrees
+    }
 
     public var dimensionsText: String {
         guard let width, let height else { return "Unknown" }
@@ -29,7 +42,9 @@ public struct FFprobeResponse: Decodable, Sendable {
             height: videoStream?.height,
             videoCodec: videoStream?.codecName,
             audioCodec: audioStream?.codecName,
-            frameRate: videoStream?.frameRateValue
+            frameRate: videoStream?.frameRateValue,
+            pixelFormat: videoStream?.pixelFormat,
+            rotationDegrees: videoStream?.rotationDegrees
         )
     }
 }
@@ -42,6 +57,9 @@ public struct FFprobeStream: Decodable, Sendable {
     public let duration: String?
     public let avgFrameRate: String?
     public let rFrameRate: String?
+    public let pixelFormat: String?
+    public let tags: [String: String]?
+    public let sideDataList: [FFprobeSideData]?
 
     enum CodingKeys: String, CodingKey {
         case codecName = "codec_name"
@@ -51,6 +69,9 @@ public struct FFprobeStream: Decodable, Sendable {
         case duration
         case avgFrameRate = "avg_frame_rate"
         case rFrameRate = "r_frame_rate"
+        case pixelFormat = "pix_fmt"
+        case tags
+        case sideDataList = "side_data_list"
     }
 
     public var durationValue: TimeInterval? {
@@ -72,6 +93,20 @@ public struct FFprobeStream: Decodable, Sendable {
         }
         return Double(value)
     }
+
+    public var rotationDegrees: Int? {
+        if let rotate = tags?["rotate"], let value = Double(rotate) {
+            return Int(value.rounded()).normalizedRotationDegrees
+        }
+        if let sideRotation = sideDataList?.compactMap(\.rotation).first {
+            return Int(sideRotation.rounded()).normalizedRotationDegrees
+        }
+        return nil
+    }
+}
+
+public struct FFprobeSideData: Decodable, Sendable {
+    public let rotation: Double?
 }
 
 public struct FFprobeFormat: Decodable, Sendable {

@@ -34,4 +34,32 @@ final class FFprobeDecodingTests: XCTestCase {
         XCTAssertEqual(metadata.audioCodec, "aac")
         XCTAssertEqual(metadata.frameRate ?? 0, 29.970, accuracy: 0.001)
     }
+
+    func testFFprobeRotationMetadataDecoding() throws {
+        let json = """
+        {
+          "streams": [
+            {
+              "codec_name": "h264",
+              "codec_type": "video",
+              "width": 1920,
+              "height": 1080,
+              "side_data_list": [
+                {
+                  "rotation": -90
+                }
+              ]
+            }
+          ],
+          "format": {
+            "duration": "10.0"
+          }
+        }
+        """.data(using: .utf8)!
+
+        let response = try JSONDecoder().decode(FFprobeResponse.self, from: json)
+        let metadata = response.videoMetadata()
+
+        XCTAssertEqual(metadata.rotationDegrees, 270)
+    }
 }

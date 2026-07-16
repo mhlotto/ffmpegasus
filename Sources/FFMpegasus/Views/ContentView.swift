@@ -112,9 +112,33 @@ final class AppViewModel: ObservableObject {
 final class EditingOperationController: ObservableObject {
     private let editingService = VideoEditingService()
 
-    func start(ffmpegPath: String, request: EditingRequest, state: EditingOperationState) {
+    func start(ffmpegPath: String, ffprobePath: String, request: EditingRequest, state: EditingOperationState) {
         Task {
-            await editingService.run(ffmpegPath: ffmpegPath, request: request, state: state)
+            await editingService.run(ffmpegPath: ffmpegPath, ffprobePath: ffprobePath, request: request, state: state)
+        }
+    }
+
+    func removeAudio(ffmpegPath: String, request: RemoveAudioRequest, state: EditingOperationState) {
+        Task {
+            await editingService.runRemoveAudio(ffmpegPath: ffmpegPath, request: request, state: state)
+        }
+    }
+
+    func compress(ffmpegPath: String, ffprobePath: String, request: CompressionRequest, state: EditingOperationState) {
+        Task {
+            await editingService.runCompression(ffmpegPath: ffmpegPath, ffprobePath: ffprobePath, request: request, state: state)
+        }
+    }
+
+    func transform(ffmpegPath: String, ffprobePath: String, request: VideoTransformRequest, state: EditingOperationState) {
+        Task {
+            await editingService.runTransform(ffmpegPath: ffmpegPath, ffprobePath: ffprobePath, request: request, state: state)
+        }
+    }
+
+    func exportPlan(ffmpegPath: String, ffprobePath: String, plan: VideoEditPlan, state: EditingOperationState) {
+        Task {
+            await editingService.runEditPlan(ffmpegPath: ffmpegPath, ffprobePath: ffprobePath, plan: plan, state: state)
         }
     }
 
@@ -149,8 +173,13 @@ struct ContentView: View {
                     EditingView(
                         inputURL: model.videoURL,
                         duration: model.duration,
+                        metadata: model.metadata,
                         operationState: operationState,
                         onStart: startEditing,
+                        onRemoveAudio: startRemoveAudio,
+                        onCompress: startCompression,
+                        onTransform: startTransform,
+                        onExportPlan: startEditPlanExport,
                         onCancel: { editingController.cancel(state: operationState) }
                     )
                     OperationProgressView(state: operationState, onCancel: { editingController.cancel(state: operationState) })
@@ -210,7 +239,26 @@ struct ContentView: View {
 
     private func startEditing(_ request: EditingRequest) {
         let ffmpegPath = model.ffmpegPath
+        let ffprobePath = model.ffprobePath
         let operationState = operationState
-        editingController.start(ffmpegPath: ffmpegPath, request: request, state: operationState)
+        editingController.start(ffmpegPath: ffmpegPath, ffprobePath: ffprobePath, request: request, state: operationState)
+    }
+
+    private func startRemoveAudio(_ request: RemoveAudioRequest) {
+        let ffmpegPath = model.ffmpegPath
+        let operationState = operationState
+        editingController.removeAudio(ffmpegPath: ffmpegPath, request: request, state: operationState)
+    }
+
+    private func startCompression(_ request: CompressionRequest) {
+        editingController.compress(ffmpegPath: model.ffmpegPath, ffprobePath: model.ffprobePath, request: request, state: operationState)
+    }
+
+    private func startTransform(_ request: VideoTransformRequest) {
+        editingController.transform(ffmpegPath: model.ffmpegPath, ffprobePath: model.ffprobePath, request: request, state: operationState)
+    }
+
+    private func startEditPlanExport(_ plan: VideoEditPlan) {
+        editingController.exportPlan(ffmpegPath: model.ffmpegPath, ffprobePath: model.ffprobePath, plan: plan, state: operationState)
     }
 }

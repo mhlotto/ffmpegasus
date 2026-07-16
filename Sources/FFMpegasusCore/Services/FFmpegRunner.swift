@@ -315,6 +315,12 @@ final class LockedValue<Value>: @unchecked Sendable {
         storage = value
         lock.unlock()
     }
+
+    func update(_ body: (inout Value) -> Void) {
+        lock.lock()
+        body(&storage)
+        lock.unlock()
+    }
 }
 
 public struct FFmpegRunner {
@@ -332,5 +338,13 @@ public struct FFmpegRunner {
             throw ProcessExecutionError.nonZeroExit(code: result.exitCode, stderr: result.stderrText)
         }
         return result.stdoutText.components(separatedBy: .newlines).first ?? "Version detected"
+    }
+
+    public func encoders(ffmpegPath: String) async throws -> String {
+        let result = try await ProcessRunner().run(executablePath: ffmpegPath, arguments: ["-nostdin", "-hide_banner", "-encoders"])
+        guard result.exitCode == 0 else {
+            throw ProcessExecutionError.nonZeroExit(code: result.exitCode, stderr: result.stderrText)
+        }
+        return result.stdoutText
     }
 }
