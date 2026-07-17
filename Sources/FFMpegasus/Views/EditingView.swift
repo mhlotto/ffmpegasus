@@ -16,6 +16,7 @@ struct EditingView: View {
     let onExportFrame: (FrameExportRequest) -> Void
     let onExportFramesAtIntervals: (IntervalFrameExportRequest) -> Void
     let currentPlaybackTime: () -> TimeInterval
+    let canExportCurrentFrame: Bool
     let onCancel: () -> Void
 
     @State private var mode: EditingMode = .trimStart
@@ -1123,7 +1124,7 @@ struct EditingView: View {
     }
 
     private var frameExportDisabled: Bool {
-        controlsDisabled || metadata?.videoCodec == nil || frameJPEGQuality == nil || !(currentPlaybackTime().isFinite)
+        controlsDisabled || metadata?.videoCodec == nil || frameJPEGQuality == nil || !canExportCurrentFrame || !(currentPlaybackTime().isFinite)
     }
 
     private var frameExportSummary: String {

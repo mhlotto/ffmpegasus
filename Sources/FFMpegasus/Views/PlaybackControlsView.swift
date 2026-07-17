@@ -6,13 +6,15 @@ struct PlaybackControlsView: View {
     let isPlaying: Bool
     let currentTime: TimeInterval
     let duration: TimeInterval
+    let canSeek: Bool
+    let isScrubbing: Bool
+    let isSeeking: Bool
     let onPlay: () -> Void
     let onPause: () -> Void
     let onStop: () -> Void
-    let onSeek: (TimeInterval) -> Void
-
-    @State private var sliderValue: Double = 0
-    @State private var isDragging = false
+    let onBeginScrubbing: () -> Void
+    let onScrubChanged: (TimeInterval) -> Void
+    let onEndScrubbing: () -> Void
 
     var body: some View {
         VStack(spacing: 8) {
@@ -32,31 +34,41 @@ struct PlaybackControlsView: View {
                 }
                 .disabled(!hasVideo)
 
-                Text(TimeFormatting.clockTime(currentTime))
+                Text(TimeFormatting.timelineTime(currentTime))
                     .monospacedDigit()
-                    .frame(width: 72, alignment: .trailing)
+                    .frame(width: duration >= 3600 ? 96 : 76, alignment: .trailing)
 
                 Slider(
                     value: Binding(
-                        get: { isDragging ? sliderValue : currentTime },
+                        get: { TimeFormatting.clampedPlaybackTime(currentTime, duration: duration) },
                         set: { value in
-                            sliderValue = value
-                            isDragging = true
+                            if !isScrubbing {
+                                onBeginScrubbing()
+                            }
+                            onScrubChanged(value)
                         }
                     ),
-                    in: 0...max(duration, 0.01),
+                    in: 0...max(duration, 0.001),
                     onEditingChanged: { editing in
-                        isDragging = editing
                         if !editing {
-                            onSeek(sliderValue)
+                            onEndScrubbing()
+                        } else if !isScrubbing {
+                            onBeginScrubbing()
                         }
                     }
                 )
-                .disabled(!hasVideo)
+                .disabled(!canSeek)
+                .accessibilityLabel("Video timeline")
+                .accessibilityValue("\(TimeFormatting.timelineTime(currentTime)) of \(TimeFormatting.timelineTime(duration))")
 
-                Text(TimeFormatting.clockTime(duration))
+                Text(TimeFormatting.timelineTime(duration))
                     .monospacedDigit()
-                    .frame(width: 72, alignment: .leading)
+                    .frame(width: duration >= 3600 ? 96 : 76, alignment: .leading)
+            }
+            if isSeeking {
+                Text("Seeking...")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }

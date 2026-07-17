@@ -12,14 +12,29 @@ final class AppViewModel: ObservableObject {
     @Published var player: AVPlayer?
     @Published var metadata: VideoMetadata?
     @Published var metadataMessage: String?
-    @Published var currentTime: TimeInterval = 0
-    @Published var duration: TimeInterval = 0
-    @Published var isPlaying = false
+    @Published private(set) var timeline = PlaybackTimelineState()
 
     private var timeObserver: Any?
+    private weak var timeObserverPlayer: AVPlayer?
+    private var itemStatusObservation: NSKeyValueObservation?
+    private var endObserver: NSObjectProtocol?
+    private var shouldResumeAfterScrub = false
+    private var pendingLivePreviewSeconds: TimeInterval?
+    private var livePreviewTask: Task<Void, Never>?
+    private var livePreviewSeekInFlight = false
+    private let livePreviewSeekIntervalNanoseconds: UInt64 = 75_000_000
+    private let livePreviewSeekToleranceSeconds: TimeInterval = 0.075
 
     var fileName: String {
         videoURL?.lastPathComponent ?? "No video open"
+    }
+
+    var currentTime: TimeInterval { timeline.displayedTimeSeconds }
+    var committedTime: TimeInterval { timeline.committedTimeSeconds }
+    var duration: TimeInterval { timeline.durationSeconds }
+    var isPlaying: Bool { timeline.isPlaying }
+    var isSeekingOrScrubbing: Bool {
+        timeline.hasPendingSeek || timeline.isScrubbing || livePreviewSeekInFlight || livePreviewTask != nil
     }
 
     func openVideo() {
@@ -37,73 +52,245 @@ final class AppViewModel: ObservableObject {
         closeVideo()
         videoURL = url
         metadataMessage = "Loading metadata"
+        timeline.open(duration: 0)
 
-        let player = AVPlayer(url: url)
+        let item = AVPlayerItem(url: url)
+        let player = AVPlayer(playerItem: item)
         self.player = player
+        observeItem(item)
         attachTimeObserver(to: player)
 
         Task {
             do {
                 let loadedMetadata = try await FFprobeRunner().loadMetadata(ffprobePath: ffprobePath, inputURL: url)
+                guard self.videoURL == url else { return }
                 metadata = loadedMetadata
-                duration = loadedMetadata.duration
+                timeline.setDuration(loadedMetadata.duration)
                 metadataMessage = nil
             } catch {
+                guard self.videoURL == url else { return }
                 metadata = nil
                 metadataMessage = error.localizedDescription
                 let assetDuration = try? await AVURLAsset(url: url).load(.duration).seconds
-                duration = assetDuration ?? 0
+                timeline.setDuration(assetDuration ?? 0)
             }
         }
     }
 
     func closeVideo() {
-        if let player, let timeObserver {
-            player.removeTimeObserver(timeObserver)
+        removeTimeObserver()
+        itemStatusObservation = nil
+        if let endObserver {
+            NotificationCenter.default.removeObserver(endObserver)
+            self.endObserver = nil
         }
         player?.pause()
+        player?.replaceCurrentItem(with: nil)
         player = nil
-        timeObserver = nil
         videoURL = nil
         metadata = nil
         metadataMessage = nil
-        currentTime = 0
-        duration = 0
-        isPlaying = false
+        shouldResumeAfterScrub = false
+        cancelLivePreviewSeekScheduling()
+        livePreviewSeekInFlight = false
+        timeline.close()
     }
 
     func play() {
-        player?.play()
-        isPlaying = true
+        guard let player else { return }
+        if timeline.durationSeconds > 0, timeline.committedTimeSeconds >= timeline.durationSeconds - 0.05 {
+            let seek = timeline.beginSeek(to: 0)
+            player.seek(to: cmTime(seek.target), toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self else { return }
+                    guard self.timeline.completeSeek(generation: seek.generation, actualTime: 0) else { return }
+                    self.player?.play()
+                    self.timeline.setPlaying(true)
+                }
+            }
+            return
+        }
+        player.play()
+        timeline.setPlaying(true)
     }
 
     func pause() {
         player?.pause()
-        isPlaying = false
+        timeline.setPlaying(false)
     }
 
     func stop() {
-        player?.pause()
-        player?.seek(to: .zero)
-        currentTime = 0
-        isPlaying = false
+        guard let player else {
+            timeline.close()
+            return
+        }
+        player.pause()
+        cancelLivePreviewSeekScheduling()
+        livePreviewSeekInFlight = false
+        let seek = timeline.stop()
+        player.seek(to: seekTime(seek.target), toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+            Task { @MainActor in
+                _ = self?.timeline.completeSeek(generation: seek.generation, actualTime: 0)
+            }
+        }
     }
 
     func seek(to seconds: TimeInterval) {
-        let time = CMTime(seconds: seconds, preferredTimescale: 600)
-        player?.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
-        currentTime = seconds
+        guard let player else { return }
+        let seek = timeline.beginSeek(to: seconds)
+        player.seek(to: seekTime(seek.target), toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+            Task { @MainActor in
+                _ = self?.timeline.completeSeek(generation: seek.generation, actualTime: seek.target)
+            }
+        }
+    }
+
+    func beginScrubbing() {
+        cancelLivePreviewSeekScheduling()
+        pendingLivePreviewSeconds = nil
+        livePreviewSeekInFlight = false
+        shouldResumeAfterScrub = timeline.isPlaying
+        player?.pause()
+        timeline.beginScrubbing()
+    }
+
+    func updateScrubPosition(_ seconds: TimeInterval) {
+        timeline.updateScrubPosition(seconds)
+        guard timeline.isScrubbing else { return }
+        pendingLivePreviewSeconds = timeline.scrubTimeSeconds
+        scheduleLivePreviewSeek()
+    }
+
+    func endScrubbing() {
+        cancelLivePreviewSeekScheduling()
+        guard let player, let seek = timeline.beginSeekFromScrub() else { return }
+        pendingLivePreviewSeconds = nil
+        let targetTime = seekTime(seek.target)
+        player.seek(to: targetTime, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                guard self.timeline.completeSeek(generation: seek.generation, actualTime: seek.target) else { return }
+                if self.shouldResumeAfterScrub {
+                    self.player?.play()
+                    self.timeline.setPlaying(true)
+                }
+                self.shouldResumeAfterScrub = false
+            }
+        }
+    }
+
+    private func scheduleLivePreviewSeek() {
+        guard livePreviewTask == nil, !livePreviewSeekInFlight else { return }
+        livePreviewTask = Task { [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(nanoseconds: livePreviewSeekIntervalNanoseconds)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                self.livePreviewTask = nil
+                self.performLivePreviewSeek()
+            }
+        }
+    }
+
+    private func performLivePreviewSeek() {
+        guard let player, timeline.isScrubbing, let target = pendingLivePreviewSeconds else { return }
+        pendingLivePreviewSeconds = nil
+        guard let seek = timeline.beginLivePreviewSeek(to: target) else { return }
+        livePreviewSeekInFlight = true
+        let tolerance = CMTime(seconds: livePreviewSeekToleranceSeconds, preferredTimescale: 600)
+        player.seek(to: seekTime(seek.target), toleranceBefore: tolerance, toleranceAfter: tolerance) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.livePreviewSeekInFlight = false
+                _ = self.timeline.completeLivePreviewSeek(generation: seek.generation)
+                if self.timeline.isScrubbing, self.pendingLivePreviewSeconds != nil {
+                    self.scheduleLivePreviewSeek()
+                }
+            }
+        }
+    }
+
+    private func cancelLivePreviewSeekScheduling() {
+        livePreviewTask?.cancel()
+        livePreviewTask = nil
+        pendingLivePreviewSeconds = nil
     }
 
     private func attachTimeObserver(to player: AVPlayer) {
+        removeTimeObserver()
+        timeObserverPlayer = player
         timeObserver = player.addPeriodicTimeObserver(
-            forInterval: CMTime(seconds: 0.25, preferredTimescale: 600),
+            forInterval: CMTime(seconds: 0.1, preferredTimescale: 600),
             queue: .main
         ) { [weak self] time in
             guard let self else { return }
             Task { @MainActor in
-                self.currentTime = time.seconds.isFinite ? time.seconds : 0
+                self.timeline.applyObserverTime(time.seconds)
             }
+        }
+    }
+
+    private func removeTimeObserver() {
+        if let timeObserver, let timeObserverPlayer {
+            timeObserverPlayer.removeTimeObserver(timeObserver)
+        }
+        timeObserver = nil
+        timeObserverPlayer = nil
+    }
+
+    private func observeItem(_ item: AVPlayerItem) {
+        itemStatusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] observedItem, _ in
+            Task { @MainActor in
+                guard let self, self.player?.currentItem === observedItem else { return }
+                self.timeline.setReadyForSeeking(observedItem.status == .readyToPlay)
+                if observedItem.status == .readyToPlay {
+                    let duration = observedItem.duration.seconds
+                    if TimeFormatting.isSeekableDuration(duration) {
+                        self.timeline.setDuration(duration)
+                    }
+                } else if observedItem.status == .failed {
+                    self.metadataMessage = observedItem.error?.localizedDescription ?? "Playback item failed."
+                }
+            }
+        }
+
+        endObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: item,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.player?.currentItem === item else { return }
+                self.timeline.applyObserverTime(self.timeline.durationSeconds)
+                self.timeline.setPlaying(false)
+            }
+        }
+    }
+
+    private func cmTime(_ seconds: TimeInterval) -> CMTime {
+        CMTime(seconds: seconds, preferredTimescale: 600)
+    }
+
+    private func seekTime(_ seconds: TimeInterval) -> CMTime {
+        let clamped = TimeFormatting.clampedPlaybackTime(seconds, duration: timeline.durationSeconds)
+        let safeEnd: TimeInterval
+        if timeline.durationSeconds > 0, clamped >= timeline.durationSeconds {
+            safeEnd = max(0, timeline.durationSeconds - 0.001)
+        } else {
+            safeEnd = clamped
+        }
+        return cmTime(safeEnd)
+    }
+
+    deinit {
+        MainActor.assumeIsolated {
+            if let timeObserver, let timeObserverPlayer {
+                timeObserverPlayer.removeTimeObserver(timeObserver)
+            }
+            if let endObserver {
+                NotificationCenter.default.removeObserver(endObserver)
+            }
+            livePreviewTask?.cancel()
         }
     }
 }
@@ -182,10 +369,15 @@ struct ContentView: View {
                         isPlaying: model.isPlaying,
                         currentTime: model.currentTime,
                         duration: model.duration,
+                        canSeek: model.timeline.canSeek,
+                        isScrubbing: model.timeline.isScrubbing,
+                        isSeeking: model.timeline.isSeeking,
                         onPlay: model.play,
                         onPause: model.pause,
                         onStop: model.stop,
-                        onSeek: model.seek(to:)
+                        onBeginScrubbing: model.beginScrubbing,
+                        onScrubChanged: model.updateScrubPosition(_:),
+                        onEndScrubbing: model.endScrubbing
                     )
                     metadataSection
                     EditingView(
@@ -202,6 +394,7 @@ struct ContentView: View {
                         onExportFrame: startFrameExport,
                         onExportFramesAtIntervals: startIntervalFrameExport,
                         currentPlaybackTime: currentPlaybackTime,
+                        canExportCurrentFrame: !model.isSeekingOrScrubbing,
                         onCancel: { editingController.cancel(state: operationState) }
                     )
                     OperationProgressView(state: operationState, onCancel: { editingController.cancel(state: operationState) })
@@ -297,7 +490,6 @@ struct ContentView: View {
     }
 
     private func currentPlaybackTime() -> TimeInterval {
-        let seconds = model.player?.currentTime().seconds ?? model.currentTime
-        return seconds.isFinite ? seconds : model.currentTime
+        model.committedTime
     }
 }
