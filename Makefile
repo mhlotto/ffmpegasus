@@ -1,7 +1,7 @@
 SWIFT := swift
 APP := FFMpegasus
 
-.PHONY: build run test clean
+.PHONY: build run test clean fixtures fixtures-validate fixtures-clean
 
 build:
 	$(SWIFT) build
@@ -14,3 +14,12 @@ test:
 
 clean:
 	$(SWIFT) package clean
+
+fixtures:
+	scripts/fixtures.sh generate
+
+fixtures-validate:
+	scripts/fixtures.sh validate
+
+fixtures-clean:
+	scripts/fixtures.sh clean

@@ -3,38 +3,25 @@ import XCTest
 
 final class FFmpegIntegrationTests: XCTestCase {
     func testOptionalFFmpegSyntheticStreamCopyTrim() async throws {
-        let ffmpegPath = "/opt/homebrew/bin/ffmpeg"
-        guard FileManager.default.isExecutableFile(atPath: ffmpegPath) else {
-            throw XCTSkip("FFmpeg is not available at \(ffmpegPath)")
-        }
+        let tools = try MediaFixtures.requireTools()
+        try await MediaFixtures.ensureGenerated()
+        let standard = try MediaFixtures.fixture(id: "standardLandscape")
+        let input = MediaFixtures.url(for: standard)
 
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let input = directory.appendingPathComponent("input.mp4")
         let output = directory.appendingPathComponent("output.mp4")
-
-        let generate = try await ProcessRunner().run(
-            executablePath: ffmpegPath,
-            arguments: [
-                "-y", "-nostdin",
-                "-f", "lavfi",
-                "-i", "testsrc=size=160x120:rate=10:duration=2",
-                "-pix_fmt", "yuv420p",
-                input.path
-            ]
-        )
-        XCTAssertEqual(generate.exitCode, 0, generate.stderrText)
 
         let request = EditingRequest(
             inputURL: input,
             outputURL: output,
-            sourceDuration: 2,
+            sourceDuration: standard.durationSeconds,
             removeStartSeconds: 0.5,
             removeEndSeconds: 0,
             mode: .trimStart,
             method: .streamCopy
         )
-        let command = try VideoEditingService().command(ffmpegPath: ffmpegPath, request: request)
+        let command = try VideoEditingService().command(ffmpegPath: tools.ffmpeg, request: request)
         let trim = try await ProcessRunner().run(executablePath: command.executablePath, arguments: command.arguments)
 
         XCTAssertEqual(trim.exitCode, 0, trim.stderrText)
@@ -145,45 +132,27 @@ final class FFmpegIntegrationTests: XCTestCase {
     }
 
     func testOptionalFFmpegSyntheticRemoveAudio() async throws {
-        let ffmpegPath = "/opt/homebrew/bin/ffmpeg"
-        let ffprobePath = "/opt/homebrew/bin/ffprobe"
-        guard FileManager.default.isExecutableFile(atPath: ffmpegPath),
-              FileManager.default.isExecutableFile(atPath: ffprobePath) else {
-            throw XCTSkip("FFmpeg or FFprobe is not available at the default Homebrew paths")
-        }
+        let tools = try MediaFixtures.requireTools()
+        try await MediaFixtures.ensureGenerated()
+        let standard = try MediaFixtures.fixture(id: "standardLandscape")
+        let input = MediaFixtures.url(for: standard)
 
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let input = directory.appendingPathComponent("input.mp4")
         let output = directory.appendingPathComponent("output.mp4")
-
-        let generate = try await ProcessRunner().run(
-            executablePath: ffmpegPath,
-            arguments: [
-                "-y", "-nostdin",
-                "-f", "lavfi",
-                "-i", "testsrc=size=160x120:rate=10:duration=2",
-                "-f", "lavfi",
-                "-i", "sine=frequency=1000:duration=2",
-                "-shortest",
-                "-pix_fmt", "yuv420p",
-                input.path
-            ]
-        )
-        XCTAssertEqual(generate.exitCode, 0, generate.stderrText)
 
         let request = RemoveAudioRequest(
             inputURL: input,
             outputURL: output,
-            sourceDuration: 2,
+            sourceDuration: standard.durationSeconds,
             hasVideoStream: true,
             hasAudioStream: true
         )
-        let command = VideoEditingService().removeAudioCommand(ffmpegPath: ffmpegPath, request: request)
+        let command = VideoEditingService().removeAudioCommand(ffmpegPath: tools.ffmpeg, request: request)
         let removeAudio = try await ProcessRunner().run(executablePath: command.executablePath, arguments: command.arguments)
         XCTAssertEqual(removeAudio.exitCode, 0, removeAudio.stderrText)
 
-        let metadata = try await FFprobeRunner().loadMetadata(ffprobePath: ffprobePath, inputURL: output)
+        let metadata = try await FFprobeRunner().loadMetadata(ffprobePath: tools.ffprobe, inputURL: output)
         XCTAssertNotNil(metadata.videoCodec)
         XCTAssertNil(metadata.audioCodec)
     }
@@ -597,37 +566,23 @@ final class FFmpegIntegrationTests: XCTestCase {
     }
 
     func testOptionalFFmpegSyntheticFrameExport() async throws {
-        let ffmpegPath = "/opt/homebrew/bin/ffmpeg"
-        guard FileManager.default.isExecutableFile(atPath: ffmpegPath) else {
-            throw XCTSkip("FFmpeg is not available at \(ffmpegPath)")
-        }
+        let tools = try MediaFixtures.requireTools()
+        try await MediaFixtures.ensureGenerated()
+        let fixture = try MediaFixtures.fixture(id: "frameIdentifiable")
+        let input = MediaFixtures.url(for: fixture)
 
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let input = directory.appendingPathComponent("input video.mp4")
         let pngStart = directory.appendingPathComponent("frame-start.png")
         let pngLater = directory.appendingPathComponent("frame-later.png")
         let jpegNearEnd = directory.appendingPathComponent("frame-end.jpg")
         let service = VideoEditingService()
 
-        let generate = try await ProcessRunner().run(
-            executablePath: ffmpegPath,
-            arguments: [
-                "-y", "-nostdin",
-                "-f", "lavfi",
-                "-i", "testsrc2=size=160x120:rate=10:duration=3.5",
-                "-c:v", "libx264",
-                "-pix_fmt", "yuv420p",
-                input.path
-            ]
-        )
-        XCTAssertEqual(generate.exitCode, 0, generate.stderrText)
+        let startRequest = try frameExportRequest(input: input, fixture: fixture, output: pngStart, timestamp: 0, format: .png)
+        let laterRequest = try frameExportRequest(input: input, fixture: fixture, output: pngLater, timestamp: 1.25, format: .png)
+        let jpegRequest = try frameExportRequest(input: input, fixture: fixture, output: jpegNearEnd, timestamp: 2.75, format: .jpeg)
 
-        let startRequest = try frameExportRequest(input: input, output: pngStart, timestamp: 0, format: .png)
-        let laterRequest = try frameExportRequest(input: input, output: pngLater, timestamp: 1.25, format: .png)
-        let jpegRequest = try frameExportRequest(input: input, output: jpegNearEnd, timestamp: 2.75, format: .jpeg)
-
-        let startCommand = try service.frameExportCommand(ffmpegPath: ffmpegPath, request: startRequest)
+        let startCommand = try service.frameExportCommand(ffmpegPath: tools.ffmpeg, request: startRequest)
         XCTAssertEqual(startCommand.arguments.commandValue(after: "-i"), input.path)
         XCTAssertGreaterThan(
             try XCTUnwrap(startCommand.arguments.firstIndex(of: "-ss")),
@@ -636,8 +591,8 @@ final class FFmpegIntegrationTests: XCTestCase {
 
         for (request, command) in [
             (startRequest, startCommand),
-            (laterRequest, try service.frameExportCommand(ffmpegPath: ffmpegPath, request: laterRequest)),
-            (jpegRequest, try service.frameExportCommand(ffmpegPath: ffmpegPath, request: jpegRequest))
+            (laterRequest, try service.frameExportCommand(ffmpegPath: tools.ffmpeg, request: laterRequest)),
+            (jpegRequest, try service.frameExportCommand(ffmpegPath: tools.ffmpeg, request: jpegRequest))
         ] {
             let result = try await ProcessRunner().run(executablePath: command.executablePath, arguments: command.arguments)
             XCTAssertEqual(result.exitCode, 0, result.stderrText)
@@ -649,39 +604,19 @@ final class FFmpegIntegrationTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted(), [
             "frame-end.jpg",
             "frame-later.png",
-            "frame-start.png",
-            "input video.mp4"
+            "frame-start.png"
         ])
     }
 
     func testOptionalFFmpegSyntheticIntervalFrameExport() async throws {
-        let ffmpegPath = "/opt/homebrew/bin/ffmpeg"
-        guard FileManager.default.isExecutableFile(atPath: ffmpegPath) else {
-            throw XCTSkip("FFmpeg is not available at \(ffmpegPath)")
-        }
+        let tools = try MediaFixtures.requireTools()
+        try await MediaFixtures.ensureGenerated()
+        let standard = try MediaFixtures.fixture(id: "standardLandscape")
+        let input = MediaFixtures.url(for: standard)
 
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let input = directory.appendingPathComponent("input.mp4")
         let service = VideoEditingService()
-
-        let generate = try await ProcessRunner().run(
-            executablePath: ffmpegPath,
-            arguments: [
-                "-y", "-nostdin",
-                "-f", "lavfi",
-                "-i", "testsrc2=size=160x120:rate=10:duration=10",
-                "-f", "lavfi",
-                "-i", "sine=frequency=660:duration=10",
-                "-shortest",
-                "-c:v", "libx264",
-                "-pix_fmt", "yuv420p",
-                "-c:a", "aac",
-                "-b:a", "96k",
-                input.path
-            ]
-        )
-        XCTAssertEqual(generate.exitCode, 0, generate.stderrText)
 
         let entireDirectory = directory.appendingPathComponent("entire", isDirectory: true)
         let rangeDirectory = directory.appendingPathComponent("range", isDirectory: true)
@@ -691,17 +626,17 @@ final class FFmpegIntegrationTests: XCTestCase {
             try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
         }
 
-        let entire = try intervalRequest(input: input, outputDirectory: entireDirectory, start: 0, end: 10, interval: 2, format: .png)
-        try await runIntervalFrameExport(service: service, ffmpegPath: ffmpegPath, request: entire)
+        let entire = try intervalRequest(input: input, fixture: standard, outputDirectory: entireDirectory, start: 0, end: 10, interval: 2, format: .png)
+        try await runIntervalFrameExport(service: service, ffmpegPath: tools.ffmpeg, request: entire)
 
-        let range = try intervalRequest(input: input, outputDirectory: rangeDirectory, start: 2, end: 8, interval: 2, format: .png)
-        try await runIntervalFrameExport(service: service, ffmpegPath: ffmpegPath, request: range)
+        let range = try intervalRequest(input: input, fixture: standard, outputDirectory: rangeDirectory, start: 2, end: 8, interval: 2, format: .png)
+        try await runIntervalFrameExport(service: service, ffmpegPath: tools.ffmpeg, request: range)
 
-        let fractional = try intervalRequest(input: input, outputDirectory: fractionalDirectory, start: 0, end: 2, interval: 0.5, format: .png)
-        try await runIntervalFrameExport(service: service, ffmpegPath: ffmpegPath, request: fractional)
+        let fractional = try intervalRequest(input: input, fixture: standard, outputDirectory: fractionalDirectory, start: 0, end: 2, interval: 0.5, format: .png)
+        try await runIntervalFrameExport(service: service, ffmpegPath: tools.ffmpeg, request: fractional)
 
-        let jpeg = try intervalRequest(input: input, outputDirectory: jpegDirectory, start: 0, end: 2, interval: 1, format: .jpeg)
-        try await runIntervalFrameExport(service: service, ffmpegPath: ffmpegPath, request: jpeg)
+        let jpeg = try intervalRequest(input: input, fixture: standard, outputDirectory: jpegDirectory, start: 0, end: 2, interval: 1, format: .jpeg)
+        try await runIntervalFrameExport(service: service, ffmpegPath: tools.ffmpeg, request: jpeg)
 
         let first = try Data(contentsOf: entire.outputURL(forSequenceNumber: 1))
         let middle = try Data(contentsOf: entire.outputURL(forSequenceNumber: 3))
@@ -803,6 +738,7 @@ final class FFmpegIntegrationTests: XCTestCase {
 
     private func frameExportRequest(
         input: URL,
+        fixture: MediaFixture,
         output: URL,
         timestamp: TimeInterval,
         format: FrameImageFormat
@@ -811,9 +747,9 @@ final class FFmpegIntegrationTests: XCTestCase {
             inputURL: input,
             outputURL: output,
             timestampSeconds: timestamp,
-            sourceDuration: 3.5,
-            sourceDimensions: VideoDimensions(width: 160, height: 120),
-            sourceRotationDegrees: nil,
+            sourceDuration: fixture.durationSeconds,
+            sourceDimensions: VideoDimensions(width: fixture.codedWidth, height: fixture.codedHeight),
+            sourceRotationDegrees: fixture.rotationDegrees,
             hasVideoStream: true,
             format: format,
             jpegQuality: format == .jpeg ? try JPEGQuality(ffmpegValue: 4) : nil
@@ -822,6 +758,7 @@ final class FFmpegIntegrationTests: XCTestCase {
 
     private func intervalRequest(
         input: URL,
+        fixture: MediaFixture,
         outputDirectory: URL,
         start: TimeInterval,
         end: TimeInterval,
@@ -831,12 +768,12 @@ final class FFmpegIntegrationTests: XCTestCase {
         IntervalFrameExportRequest(
             inputURL: input,
             outputDirectoryURL: outputDirectory,
-            sourceDuration: 10,
-            sourceDimensions: VideoDimensions(width: 160, height: 120),
-            sourceRotationDegrees: nil,
+            sourceDuration: fixture.durationSeconds,
+            sourceDimensions: VideoDimensions(width: fixture.codedWidth, height: fixture.codedHeight),
+            sourceRotationDegrees: fixture.rotationDegrees,
             hasVideoStream: true,
             interval: try FrameInterval(seconds: interval),
-            range: try FrameExportRange(startSeconds: start, endSeconds: end, sourceDuration: 10),
+            range: try FrameExportRange(startSeconds: start, endSeconds: end, sourceDuration: fixture.durationSeconds),
             format: format,
             jpegQuality: format == .jpeg ? try JPEGQuality(ffmpegValue: 4) : nil,
             countTolerance: 1
@@ -857,7 +794,7 @@ final class FFmpegIntegrationTests: XCTestCase {
             fileSystem: LocalEditingFileSystem()
         )
         let verification = try IntervalFrameExportOutputValidator.verify(request: request, files: files)
-        XCTAssertEqual(verification.dimensions, VideoDimensions(width: 160, height: 120))
+        XCTAssertEqual(verification.dimensions, try request.expectedDimensions())
         XCTAssertGreaterThanOrEqual(verification.imageCount, max(1, request.expectedImageCount - request.countTolerance))
         XCTAssertLessThanOrEqual(verification.imageCount, request.expectedImageCount + request.countTolerance)
     }
