@@ -16,12 +16,21 @@ struct EditingView: View {
     let onExportFramesAtIntervals: (IntervalFrameExportRequest) -> Void
     let currentPlaybackTime: () -> TimeInterval
     let canExportCurrentFrame: Bool
+    let testAutomationFrameOutputURL: URL?
     let onCancel: () -> Void
 
     @State private var validationMessage: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if let validationMessage {
+                Text(validationMessage)
+                    .foregroundStyle(.red)
+                    .accessibilityIdentifier("editing.validationMessage")
+
+                Divider()
+            }
+
             TrimEditingSection(
                 inputURL: inputURL,
                 duration: duration,
@@ -42,11 +51,6 @@ struct EditingView: View {
                 validationMessage: $validationMessage,
                 onRemoveAudio: onRemoveAudio
             )
-
-            if let validationMessage {
-                Text(validationMessage)
-                    .foregroundStyle(.red)
-            }
 
             Divider()
 
@@ -102,6 +106,7 @@ struct EditingView: View {
                 validationMessage: $validationMessage,
                 currentPlaybackTime: currentPlaybackTime,
                 canExportCurrentFrame: canExportCurrentFrame,
+                testAutomationFrameOutputURL: testAutomationFrameOutputURL,
                 onExportFrame: onExportFrame
             )
 

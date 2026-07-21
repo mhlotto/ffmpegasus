@@ -108,6 +108,19 @@ struct FakeCompressionVerifier: CompressionOutputVerifying {
     }
 }
 
+final class PhaseRecordingCompressionVerifier: CompressionOutputVerifying, @unchecked Sendable {
+    private let state: EditingOperationState
+    private(set) var observedPhase: EditingOperationPhase?
+
+    init(state: EditingOperationState) {
+        self.state = state
+    }
+
+    func verify(request: CompressionRequest, outputURL: URL) async throws {
+        observedPhase = await MainActor.run { state.phase }
+    }
+}
+
 struct FakeTransformVerifier: VideoTransformOutputVerifying {
     var error: Error?
 
@@ -169,6 +182,24 @@ struct FakeIntervalFrameExportVerifier: IntervalFrameExportOutputVerifying {
 final class VideoEditingServiceTests: XCTestCase {
     private let ffmpegPath = "/opt/homebrew/bin/ffmpeg"
 
+    func testOperationPhaseTitlesAreFeatureNeutral() {
+        XCTAssertEqual(EditingOperationPhase.running(progress: nil).title, "Running FFmpeg...")
+        XCTAssertEqual(EditingOperationPhase.cancelling.title, "Cancelling...")
+        XCTAssertEqual(EditingOperationPhase.verifying.title, "Verifying output...")
+        XCTAssertEqual(EditingOperationPhase.completed(outputURL: outputURL(), byteCount: 1).title, "Operation complete")
+        XCTAssertEqual(EditingOperationPhase.failed(summary: "bad").title, "Operation failed")
+        XCTAssertEqual(EditingOperationPhase.cancelled.title, "Cancelled")
+    }
+
+    func testOperationPresentationKindUsesStructuredPhase() {
+        XCTAssertEqual(EditingOperationPhase.running(progress: nil).presentationKind, .running)
+        XCTAssertEqual(EditingOperationPhase.verifying.presentationKind, .running)
+        XCTAssertEqual(EditingOperationPhase.completed(outputURL: outputURL(), byteCount: 1).presentationKind, .success)
+        XCTAssertEqual(EditingOperationPhase.failed(summary: "bad").presentationKind, .failure)
+        XCTAssertEqual(EditingOperationPhase.cancelling.presentationKind, .cancelled)
+        XCTAssertEqual(EditingOperationPhase.cancelled.presentationKind, .cancelled)
+    }
+
     func testOperationStateTransitionsToCompletedForSuccessfulOutput() async {
         let process = FakeEditingProcessExecutor()
         process.progressValues = [0.5]
@@ -185,11 +216,33 @@ final class VideoEditingServiceTests: XCTestCase {
         XCTAssertTrue(state.isRunning)
         XCTAssertNotEqual(state.phase, .idle)
 
-        await task.value
+        _ = await task.value
 
         XCTAssertEqual(state.phase, .completed(outputURL: outputURL(), byteCount: 4096))
         XCTAssertEqual(state.outputURL, outputURL())
         XCTAssertEqual(process.command?.executablePath, ffmpegPath)
+    }
+
+    func testCompletionIsPublishedOnlyAfterOperationSpecificVerification() async {
+        let process = FakeEditingProcessExecutor()
+        let fileSystem = validFileSystem(outputSize: 4096)
+        fileSystem.files.insert(inputURL().path)
+        fileSystem.sizes[inputURL().path] = 10_000
+        let state = EditingOperationState()
+        let verifier = PhaseRecordingCompressionVerifier(state: state)
+        let service = VideoEditingService(processExecutor: process, fileSystem: fileSystem, encoderChecker: FakeEncoderChecker())
+
+        await service.runCompression(
+            ffmpegPath: ffmpegPath,
+            ffprobePath: "/opt/homebrew/bin/ffprobe",
+            request: compressionRequest(),
+            state: state,
+            verifier: verifier
+        )
+
+        XCTAssertEqual(verifier.observedPhase, .verifying)
+        XCTAssertEqual(state.phase, .completed(outputURL: outputURL(), byteCount: 4096))
+        XCTAssertEqual(state.status, "Compression complete")
     }
 
     func testExitZeroWithMissingOutputFails() async {
@@ -199,6 +252,7 @@ final class VideoEditingServiceTests: XCTestCase {
             return XCTFail("Expected failed state")
         }
         XCTAssertTrue(summary.contains("no output file was created"))
+        XCTAssertNil(state.outputURL)
     }
 
     func testExitZeroWithZeroByteOutputFails() async {
@@ -208,6 +262,7 @@ final class VideoEditingServiceTests: XCTestCase {
             return XCTFail("Expected failed state")
         }
         XCTAssertTrue(summary.contains("output file is empty"))
+        XCTAssertNil(state.outputURL)
     }
 
     func testLaunchFailureFailsVisibly() async {
@@ -219,6 +274,7 @@ final class VideoEditingServiceTests: XCTestCase {
             return XCTFail("Expected failed state")
         }
         XCTAssertTrue(summary.contains("Could not start FFmpeg"))
+        XCTAssertNil(state.outputURL)
     }
 
     func testNonzeroExitFailsWithStderrDiagnostics() async {
@@ -245,11 +301,110 @@ final class VideoEditingServiceTests: XCTestCase {
 
         try? await Task.sleep(nanoseconds: 5_000_000)
         service.requestCancellation(state: state)
-        await task.value
+        _ = await task.value
 
         XCTAssertTrue(process.didCancel)
         XCTAssertEqual(state.phase, .cancelled)
         XCTAssertEqual(fileSystem.removedFiles, [outputURL().path])
+        XCTAssertNil(state.outputURL)
+    }
+
+    func testCancellationReplacesRunningStatusImmediately() async {
+        let process = FakeEditingProcessExecutor()
+        process.waitForCancel = true
+        let fileSystem = validFileSystem(outputSize: 12)
+        let state = EditingOperationState()
+        let service = VideoEditingService(processExecutor: process, fileSystem: fileSystem)
+
+        let task = Task {
+            await service.run(ffmpegPath: ffmpegPath, request: request(), state: state)
+        }
+
+        await waitUntil { process.didStart }
+        service.requestCancellation(state: state)
+        await waitUntil {
+            if case .cancelling = state.phase {
+                return state.status == "Cancelling..."
+            }
+            return false
+        }
+
+        XCTAssertEqual(state.status, "Cancelling...")
+        XCTAssertEqual(state.message, "Cancellation requested. Stopping FFmpeg...")
+
+        _ = await task.value
+        XCTAssertEqual(state.phase, .cancelled)
+    }
+
+    func testCancellationSkipsNativeFrameVerificationAndRemainsCancelled() async {
+        let process = FakeEditingProcessExecutor()
+        process.waitForCancel = true
+        let fileSystem = validFileSystem(outputSize: 12)
+        let state = EditingOperationState()
+        let service = VideoEditingService(processExecutor: process, fileSystem: fileSystem)
+
+        let task = Task {
+            await service.runFrameExport(
+                ffmpegPath: ffmpegPath,
+                request: frameExportRequest(),
+                state: state
+            )
+        }
+
+        await waitUntil { process.didStart }
+        service.requestCancellation(state: state)
+        _ = await task.value
+
+        XCTAssertEqual(state.phase, .cancelled)
+        XCTAssertEqual(state.message, "Operation cancelled.")
+        XCTAssertEqual(fileSystem.removedFiles, [outputURL().path])
+    }
+
+    func testConcurrentOperationsAreRejectedWithoutMutatingSharedActiveState() async {
+        let process = FakeEditingProcessExecutor()
+        process.waitForCancel = true
+        let fileSystem = validFileSystem(outputSize: 12)
+        let sharedState = EditingOperationState()
+        let service = VideoEditingService(processExecutor: process, fileSystem: fileSystem)
+
+        let firstTask = Task {
+            await service.run(ffmpegPath: ffmpegPath, request: request(), state: sharedState)
+        }
+
+        await waitUntil { process.didStart }
+        let secondAccepted = await service.runRemoveAudio(ffmpegPath: ffmpegPath, request: removeAudioRequest(), state: sharedState)
+
+        XCTAssertFalse(secondAccepted)
+        XCTAssertTrue(sharedState.isRunning)
+        XCTAssertNotEqual(sharedState.phase, .failed(summary: VideoEditingError.operationInProgress.localizedDescription))
+        XCTAssertFalse(process.didCancel)
+
+        service.requestCancellation(state: sharedState)
+        _ = await firstTask.value
+
+        XCTAssertEqual(sharedState.phase, .cancelled)
+        XCTAssertTrue(process.didCancel)
+    }
+
+    func testRejectedOverlapDoesNotPreventActiveOperationFromCompleting() async {
+        let process = FakeEditingProcessExecutor()
+        process.delayNanoseconds = 30_000_000
+        let fileSystem = validFileSystem(outputSize: 4096)
+        let sharedState = EditingOperationState()
+        let service = VideoEditingService(processExecutor: process, fileSystem: fileSystem)
+
+        let firstTask = Task {
+            await service.run(ffmpegPath: ffmpegPath, request: request(), state: sharedState)
+        }
+
+        await waitUntil { process.didStart }
+        let secondAccepted = await service.runRemoveAudio(ffmpegPath: ffmpegPath, request: removeAudioRequest(), state: sharedState)
+        _ = await firstTask.value
+
+        XCTAssertFalse(secondAccepted)
+        XCTAssertEqual(sharedState.phase, .completed(outputURL: outputURL(), byteCount: 4096))
+        XCTAssertEqual(sharedState.status, "Fast trim complete")
+        XCTAssertEqual(sharedState.outputURL, outputURL())
     }
 
     func testRejectsInputAndOutputPathsBeingIdentical() async {
@@ -354,7 +509,7 @@ final class VideoEditingServiceTests: XCTestCase {
 
         try? await Task.sleep(nanoseconds: 5_000_000)
         service.requestCancellation(state: state)
-        await task.value
+        _ = await task.value
 
         XCTAssertEqual(state.phase, .cancelled)
         XCTAssertEqual(fileSystem.removedFiles, [outputURL().path])
@@ -411,6 +566,7 @@ final class VideoEditingServiceTests: XCTestCase {
             return XCTFail("Expected failed state")
         }
         XCTAssertTrue(summary.contains("not H.264"))
+        XCTAssertNil(state.outputURL)
     }
 
     func testCompressionCancellationRemovesIncompleteOutput() async {
@@ -432,10 +588,11 @@ final class VideoEditingServiceTests: XCTestCase {
 
         try? await Task.sleep(nanoseconds: 5_000_000)
         service.requestCancellation(state: state)
-        await task.value
+        _ = await task.value
 
         XCTAssertEqual(state.phase, .cancelled)
         XCTAssertEqual(fileSystem.removedFiles, [outputURL().path])
+        XCTAssertNil(state.outputURL)
     }
 
     func testTransformSucceedsWithValidOutput() async {
@@ -505,7 +662,7 @@ final class VideoEditingServiceTests: XCTestCase {
 
         try? await Task.sleep(nanoseconds: 5_000_000)
         service.requestCancellation(state: state)
-        await task.value
+        _ = await task.value
 
         XCTAssertEqual(state.phase, .cancelled)
         XCTAssertEqual(fileSystem.removedFiles, [outputURL().path])
@@ -578,7 +735,7 @@ final class VideoEditingServiceTests: XCTestCase {
 
         try? await Task.sleep(nanoseconds: 5_000_000)
         service.requestCancellation(state: state)
-        await task.value
+        _ = await task.value
 
         XCTAssertEqual(state.phase, .cancelled)
         XCTAssertEqual(fileSystem.removedFiles, [outputURL().path])
@@ -661,7 +818,7 @@ final class VideoEditingServiceTests: XCTestCase {
 
         try? await Task.sleep(nanoseconds: 5_000_000)
         service.requestCancellation(state: state)
-        await task.value
+        _ = await task.value
 
         XCTAssertEqual(state.phase, .cancelled)
         XCTAssertEqual(fileSystem.removedFiles, [outputURL().path])
@@ -722,6 +879,7 @@ final class VideoEditingServiceTests: XCTestCase {
             return XCTFail("Expected failed state")
         }
         XCTAssertTrue(summary.contains("expected PNG"))
+        XCTAssertNil(state.outputURL)
     }
 
     func testFrameExportRejectsInputAndOutputPathsBeingIdentical() async {
@@ -751,10 +909,11 @@ final class VideoEditingServiceTests: XCTestCase {
 
         try? await Task.sleep(nanoseconds: 5_000_000)
         service.requestCancellation(state: state)
-        await task.value
+        _ = await task.value
 
         XCTAssertEqual(state.phase, .cancelled)
         XCTAssertEqual(fileSystem.removedFiles, [outputURL().path])
+        XCTAssertNil(state.outputURL)
     }
 
     func testIntervalFrameExportSucceedsWithCreatedImages() async {
@@ -824,7 +983,7 @@ final class VideoEditingServiceTests: XCTestCase {
 
         try? await Task.sleep(nanoseconds: 5_000_000)
         service.requestCancellation(state: state)
-        await task.value
+        _ = await task.value
 
         XCTAssertEqual(state.phase, .cancelled)
         XCTAssertEqual(Set(fileSystem.removedFiles), Set(newFiles.map(\.path)))
@@ -1108,6 +1267,13 @@ final class VideoEditingServiceTests: XCTestCase {
 
     private func outputURL() -> URL {
         URL(fileURLWithPath: "/tmp/output.mov")
+    }
+
+    private func waitUntil(timeoutNanoseconds: UInt64 = 500_000_000, condition: @escaping () -> Bool) async {
+        let deadline = ContinuousClock.now.advanced(by: .nanoseconds(Int(timeoutNanoseconds)))
+        while !condition(), ContinuousClock.now < deadline {
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
     }
 }
 

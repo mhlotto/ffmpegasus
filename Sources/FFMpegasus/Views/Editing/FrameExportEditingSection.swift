@@ -10,6 +10,7 @@ struct FrameExportEditingSection: View {
     @Binding var validationMessage: String?
     let currentPlaybackTime: () -> TimeInterval
     let canExportCurrentFrame: Bool
+    let testAutomationFrameOutputURL: URL?
     let onExportFrame: (FrameExportRequest) -> Void
 
     @AppStorage("frameImageFormat") private var frameImageFormatRaw = FrameImageFormat.png.rawValue
@@ -125,8 +126,8 @@ struct FrameExportEditingSection: View {
         }
 
         let outputURL: URL
-        if let testOutputPath = ProcessInfo.processInfo.environment["FFMPEGASUS_XCUITEST_FRAME_OUTPUT"], !testOutputPath.isEmpty {
-            outputURL = URL(fileURLWithPath: testOutputPath)
+        if let testAutomationFrameOutputURL {
+            outputURL = testAutomationFrameOutputURL
         } else {
             let panel = NSSavePanel()
             panel.allowedContentTypes = [UTType(filenameExtension: frameImageFormat.fileExtension) ?? (frameImageFormat == .png ? .png : .jpeg)]

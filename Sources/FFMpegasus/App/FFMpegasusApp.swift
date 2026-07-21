@@ -3,9 +3,7 @@ import SwiftUI
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let environment = ProcessInfo.processInfo.environment
-        if environment["FFMPEGASUS_UI_TEST_RESET_DEFAULTS"] == "1"
-            || environment["FFMPEGASUS_XCUITEST_RESET_DEFAULTS"] == "1" {
+        if TestAutomationConfiguration.current().resetDefaults {
             [
                 "ffmpegPath",
                 "ffprobePath",

@@ -2,6 +2,7 @@ import XCTest
 
 final class FFMpegasusNativeXCUITests: XCTestCase {
     private var app: XCUIApplication!
+    private var temporaryDirectories: [URL] = []
 
     private var packageRoot: URL {
         var url = URL(fileURLWithPath: #filePath)
@@ -17,11 +18,21 @@ final class FFMpegasusNativeXCUITests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
+        let failed = (testRun?.failureCount ?? 0) > 0 || (testRun?.unexpectedExceptionCount ?? 0) > 0
         if let app, app.state != .notRunning {
-            captureDiagnostics(for: app, name: "teardown")
+            if failed {
+                captureDiagnostics(for: app, name: "teardown")
+            }
             app.terminate()
         }
         app = nil
+        if failed {
+            attachTemporaryDirectoryListings()
+        }
+        for directory in temporaryDirectories {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        temporaryDirectories.removeAll()
         try super.tearDownWithError()
     }
 
@@ -204,6 +215,7 @@ final class FFMpegasusNativeXCUITests: XCTestCase {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("ffmpegasus-\(name)-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        temporaryDirectories.append(url)
         return url
     }
 
@@ -217,5 +229,16 @@ final class FFMpegasusNativeXCUITests: XCTestCase {
         hierarchy.name = "\(name)-accessibility-hierarchy"
         hierarchy.lifetime = .keepAlways
         add(hierarchy)
+    }
+
+    private func attachTemporaryDirectoryListings() {
+        let lines = temporaryDirectories.map { directory -> String in
+            let contents = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+            return "\(directory.path):\n\(contents.sorted().joined(separator: "\n"))"
+        }
+        let attachment = XCTAttachment(string: lines.isEmpty ? "(no temporary directories)" : lines.joined(separator: "\n\n"))
+        attachment.name = "temporary-output-directories"
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 }

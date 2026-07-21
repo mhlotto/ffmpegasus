@@ -60,13 +60,14 @@ public enum EditingOperationPhase: Equatable, Sendable {
     case starting
     case running(progress: Double?)
     case cancelling
+    case verifying
     case completed(outputURL: URL, byteCount: UInt64)
     case failed(summary: String)
     case cancelled
 
     public var isActive: Bool {
         switch self {
-        case .starting, .running, .cancelling:
+        case .starting, .running, .cancelling, .verifying:
             true
         case .idle, .completed, .failed, .cancelled:
             false
@@ -80,17 +81,42 @@ public enum EditingOperationPhase: Equatable, Sendable {
         case .starting:
             "Starting FFmpeg..."
         case .running:
-            "Trimming video..."
+            "Running FFmpeg..."
         case .cancelling:
             "Cancelling..."
+        case .verifying:
+            "Verifying output..."
         case .completed:
-            "Trim complete"
+            "Operation complete"
         case .failed:
-            "Trim failed"
+            "Operation failed"
         case .cancelled:
             "Cancelled"
         }
     }
+
+    public var presentationKind: EditingOperationPresentationKind {
+        switch self {
+        case .idle:
+            .neutral
+        case .starting, .running, .verifying:
+            .running
+        case .cancelling, .cancelled:
+            .cancelled
+        case .completed:
+            .success
+        case .failed:
+            .failure
+        }
+    }
+}
+
+public enum EditingOperationPresentationKind: Equatable, Sendable {
+    case neutral
+    case running
+    case success
+    case failure
+    case cancelled
 }
 
 @MainActor
@@ -131,6 +157,7 @@ public enum VideoEditingError: LocalizedError, Equatable, Sendable {
     case missingFFmpegExecutable(String)
     case ffmpegNotExecutable(String)
     case ffmpegExited(code: Int32)
+    case operationInProgress
     case outputMissing(String)
     case outputEmpty(String)
     case launchFailed(String)
@@ -153,6 +180,8 @@ public enum VideoEditingError: LocalizedError, Equatable, Sendable {
             "FFmpeg path is not executable: \(path)"
         case .ffmpegExited(let code):
             "FFmpeg returned exit code \(code)."
+        case .operationInProgress:
+            "Another FFmpeg operation is already running."
         case .outputMissing(let path):
             "FFmpeg exited successfully, but no output file was created: \(path)"
         case .outputEmpty(let path):
@@ -241,14 +270,22 @@ public struct IntervalFrameExportResult: Equatable, Sendable {
     }
 }
 
-
+private enum EditingExecutionOutcome: Equatable, Sendable {
+    case completed(byteCount: UInt64)
+    case cancelled
+}
 
 public final class VideoEditingService: @unchecked Sendable {
     private let processExecutor: any EditingProcessExecuting
     private let fileSystem: any EditingFileSystemChecking
     private let cancellationFlag = CancellationFlag()
     private let encoderChecker: any CompressionEncoderChecking
+    private let activeLock = NSLock()
+    private var activeOperation = false
 
+    /// This service owns one process executor and one cancellation flag, so it accepts one
+    /// operation at a time. The UI also prevents overlap, but the service enforces the same
+    /// rule to keep cancellation deterministic if called directly.
     public init(
         processExecutor: any EditingProcessExecuting = FFmpegEditingProcessExecutor(),
         fileSystem: any EditingFileSystemChecking = LocalEditingFileSystem(),
@@ -267,23 +304,43 @@ public final class VideoEditingService: @unchecked Sendable {
         EditingOutputFileValidator(fileSystem: fileSystem)
     }
 
+    private func beginOperation() -> Bool {
+        activeLock.lock()
+        defer { activeLock.unlock() }
+        guard !activeOperation else { return false }
+        activeOperation = true
+        cancellationFlag.set(false)
+        return true
+    }
+
+    private func endOperation() {
+        activeLock.lock()
+        activeOperation = false
+        activeLock.unlock()
+    }
+
     public func requestCancellation(state: EditingOperationState) {
         cancellationFlag.set(true)
         Task { @MainActor in
             state.phase = .cancelling
-            state.message = "Stopping FFmpeg..."
+            state.statusText = "Cancelling..."
+            state.message = "Cancellation requested. Stopping FFmpeg..."
         }
         processExecutor.cancel()
     }
 
+    @discardableResult
     public func run(
         ffmpegPath: String,
         ffprobePath: String? = nil,
         request: EditingRequest,
         state: EditingOperationState,
         verifier: (any TrimOutputVerifying)? = nil
-    ) async {
-        cancellationFlag.set(false)
+    ) async -> Bool {
+        guard beginOperation() else {
+            return false
+        }
+        defer { endOperation() }
 
         await MainActor.run {
             state.phase = .starting
@@ -301,30 +358,43 @@ public final class VideoEditingService: @unchecked Sendable {
                     throw CompressionValidationError.missingLibx264
                 }
             }
-            try await execute(
+            let outcome = try await execute(
                 command: command,
                 totalDuration: try request.trimPlan().outputDuration,
                 outputURL: request.outputURL,
                 state: state,
-                runningStatus: "Trimming video...",
-                completedStatus: request.trimExecutionMode == .accurate ? "Accurate trim complete" : "Fast trim complete"
+                runningStatus: "Trimming video..."
             )
+            guard case .completed(let byteCount) = outcome else { return true }
             let outputVerifier = verifier ?? ffprobePath.map { FFprobeTrimOutputVerifier(ffprobePath: $0) }
+            await markVerifying(state: state)
             try await outputVerifier?.verify(request: request, outputURL: request.outputURL)
             await MainActor.run {
+                let completedStatus = request.trimExecutionMode == .accurate ? "Accurate trim complete" : "Fast trim complete"
+                state.phase = .completed(outputURL: request.outputURL, byteCount: byteCount)
+                state.statusText = completedStatus
+                state.outputURL = request.outputURL
+                state.message = "Saved: \(request.outputURL.path)"
                 if request.trimExecutionMode == .fast {
                     state.message = (state.message ?? "Saved: \(request.outputURL.path)") + "\n\nThe cut may align to nearby keyframes."
                 }
             }
         } catch ProcessExecutionError.launchFailed(let message) {
             await fail(state: state, error: VideoEditingError.launchFailed(message))
+        } catch ProcessExecutionError.cancelled {
+            await markCancelled(state: state, outputURL: request.outputURL)
         } catch {
             await fail(state: state, error: error)
         }
+        return true
     }
 
-    public func runRemoveAudio(ffmpegPath: String, request: RemoveAudioRequest, state: EditingOperationState) async {
-        cancellationFlag.set(false)
+    @discardableResult
+    public func runRemoveAudio(ffmpegPath: String, request: RemoveAudioRequest, state: EditingOperationState) async -> Bool {
+        guard beginOperation() else {
+            return false
+        }
+        defer { endOperation() }
 
         await MainActor.run {
             state.phase = .starting
@@ -339,29 +409,42 @@ public final class VideoEditingService: @unchecked Sendable {
             guard request.hasAudioStream else { throw VideoEditingError.missingAudioStream }
             let command = removeAudioCommand(ffmpegPath: ffmpegPath, request: request)
             try preflightValidator.validate(ffmpegPath: ffmpegPath, inputURL: request.inputURL, outputURL: request.outputURL)
-            try await execute(
+            let outcome = try await execute(
                 command: command,
                 totalDuration: request.sourceDuration,
                 outputURL: request.outputURL,
                 state: state,
-                runningStatus: "Removing audio...",
-                completedStatus: "Audio removed"
+                runningStatus: "Removing audio..."
             )
+            guard case .completed(let byteCount) = outcome else { return true }
+            await MainActor.run {
+                state.phase = .completed(outputURL: request.outputURL, byteCount: byteCount)
+                state.statusText = "Audio removed"
+                state.outputURL = request.outputURL
+                state.message = "Saved: \(request.outputURL.path)"
+            }
         } catch ProcessExecutionError.launchFailed(let message) {
             await fail(state: state, error: VideoEditingError.launchFailed(message))
+        } catch ProcessExecutionError.cancelled {
+            await markCancelled(state: state, outputURL: request.outputURL)
         } catch {
             await fail(state: state, error: error)
         }
+        return true
     }
 
+    @discardableResult
     public func runCompression(
         ffmpegPath: String,
         ffprobePath: String,
         request: CompressionRequest,
         state: EditingOperationState,
         verifier: (any CompressionOutputVerifying)? = nil
-    ) async {
-        cancellationFlag.set(false)
+    ) async -> Bool {
+        guard beginOperation() else {
+            return false
+        }
+        defer { endOperation() }
 
         await MainActor.run {
             state.phase = .starting
@@ -383,38 +466,48 @@ public final class VideoEditingService: @unchecked Sendable {
             try await ensureLibx264(ffmpegPath: ffmpegPath)
 
             let command = try compressionCommand(ffmpegPath: ffmpegPath, request: request)
-            try await execute(
+            let outcome = try await execute(
                 command: command,
                 totalDuration: request.sourceDuration,
                 outputURL: request.outputURL,
                 state: state,
-                runningStatus: "Compressing video...",
-                completedStatus: "Compression complete"
+                runningStatus: "Compressing video..."
             )
+            guard case .completed(let byteCount) = outcome else { return true }
 
             let outputVerifier = verifier ?? FFprobeCompressionOutputVerifier(ffprobePath: ffprobePath)
+            await markVerifying(state: state)
             try await outputVerifier.verify(request: request, outputURL: request.outputURL)
             let inputSize = fileSystem.fileSize(at: request.inputURL)
             let outputSize = fileSystem.fileSize(at: request.outputURL)
             await MainActor.run {
+                state.phase = .completed(outputURL: request.outputURL, byteCount: byteCount)
                 state.statusText = "Compression complete"
+                state.outputURL = request.outputURL
                 state.message = EditingSuccessMessageFormatter.compressionSuccessMessage(inputURL: request.inputURL, outputURL: request.outputURL, inputSize: inputSize, outputSize: outputSize)
             }
         } catch ProcessExecutionError.launchFailed(let message) {
             await fail(state: state, error: VideoEditingError.launchFailed(message))
+        } catch ProcessExecutionError.cancelled {
+            await markCancelled(state: state, outputURL: request.outputURL)
         } catch {
             await fail(state: state, error: error)
         }
+        return true
     }
 
+    @discardableResult
     public func runTransform(
         ffmpegPath: String,
         ffprobePath: String,
         request: VideoTransformRequest,
         state: EditingOperationState,
         verifier: (any VideoTransformOutputVerifying)? = nil
-    ) async {
-        cancellationFlag.set(false)
+    ) async -> Bool {
+        guard beginOperation() else {
+            return false
+        }
+        defer { endOperation() }
 
         await MainActor.run {
             state.phase = .starting
@@ -438,38 +531,48 @@ public final class VideoEditingService: @unchecked Sendable {
             }
 
             let command = try transformCommand(ffmpegPath: ffmpegPath, request: request)
-            try await execute(
+            let outcome = try await execute(
                 command: command,
                 totalDuration: request.sourceDuration,
                 outputURL: request.outputURL,
                 state: state,
-                runningStatus: "Transforming video...",
-                completedStatus: "Transformation complete"
+                runningStatus: "Transforming video..."
             )
+            guard case .completed(let byteCount) = outcome else { return true }
 
             let outputVerifier = verifier ?? FFprobeVideoTransformOutputVerifier(ffprobePath: ffprobePath)
+            await markVerifying(state: state)
             try await outputVerifier.verify(request: request, outputURL: request.outputURL)
             let inputSize = fileSystem.fileSize(at: request.inputURL)
             let outputSize = fileSystem.fileSize(at: request.outputURL)
             await MainActor.run {
+                state.phase = .completed(outputURL: request.outputURL, byteCount: byteCount)
                 state.statusText = "Transformation complete"
+                state.outputURL = request.outputURL
                 state.message = EditingSuccessMessageFormatter.transformSuccessMessage(request: request, inputSize: inputSize, outputSize: outputSize)
             }
         } catch ProcessExecutionError.launchFailed(let message) {
             await fail(state: state, error: VideoEditingError.launchFailed(message))
+        } catch ProcessExecutionError.cancelled {
+            await markCancelled(state: state, outputURL: request.outputURL)
         } catch {
             await fail(state: state, error: error)
         }
+        return true
     }
 
+    @discardableResult
     public func runEditPlan(
         ffmpegPath: String,
         ffprobePath: String,
         plan: VideoEditPlan,
         state: EditingOperationState,
         verifier: (any VideoEditPlanOutputVerifying)? = nil
-    ) async {
-        cancellationFlag.set(false)
+    ) async -> Bool {
+        guard beginOperation() else {
+            return false
+        }
+        defer { endOperation() }
 
         await MainActor.run {
             state.phase = .starting
@@ -493,38 +596,48 @@ public final class VideoEditingService: @unchecked Sendable {
             }
 
             let command = try editPlanCommand(ffmpegPath: ffmpegPath, plan: plan)
-            try await execute(
+            let outcome = try await execute(
                 command: command,
                 totalDuration: try plan.outputDuration(),
                 outputURL: plan.outputURL,
                 state: state,
-                runningStatus: "Exporting changes...",
-                completedStatus: "Export complete"
+                runningStatus: "Exporting changes..."
             )
+            guard case .completed(let byteCount) = outcome else { return true }
 
             let outputVerifier = verifier ?? FFprobeVideoEditPlanOutputVerifier(ffprobePath: ffprobePath)
+            await markVerifying(state: state)
             try await outputVerifier.verify(plan: plan, outputURL: plan.outputURL)
             let inputSize = fileSystem.fileSize(at: plan.inputURL)
             let outputSize = fileSystem.fileSize(at: plan.outputURL)
             await MainActor.run {
+                state.phase = .completed(outputURL: plan.outputURL, byteCount: byteCount)
                 state.statusText = "Export complete"
+                state.outputURL = plan.outputURL
                 state.message = EditingSuccessMessageFormatter.editPlanSuccessMessage(plan: plan, inputSize: inputSize, outputSize: outputSize)
             }
         } catch ProcessExecutionError.launchFailed(let message) {
             await fail(state: state, error: VideoEditingError.launchFailed(message))
+        } catch ProcessExecutionError.cancelled {
+            await markCancelled(state: state, outputURL: plan.outputURL)
         } catch {
             await fail(state: state, error: error)
         }
+        return true
     }
 
+    @discardableResult
     public func runSpeedChange(
         ffmpegPath: String,
         ffprobePath: String,
         request: VideoSpeedRequest,
         state: EditingOperationState,
         verifier: (any VideoSpeedOutputVerifying)? = nil
-    ) async {
-        cancellationFlag.set(false)
+    ) async -> Bool {
+        guard beginOperation() else {
+            return false
+        }
+        defer { endOperation() }
 
         await MainActor.run {
             state.phase = .starting
@@ -546,37 +659,47 @@ public final class VideoEditingService: @unchecked Sendable {
             }
 
             let command = try speedCommand(ffmpegPath: ffmpegPath, request: request)
-            try await execute(
+            let outcome = try await execute(
                 command: command,
                 totalDuration: try request.expectedDuration(),
                 outputURL: request.outputURL,
                 state: state,
-                runningStatus: "Changing video speed...",
-                completedStatus: "Speed change complete"
+                runningStatus: "Changing video speed..."
             )
+            guard case .completed(let byteCount) = outcome else { return true }
 
             let outputVerifier = verifier ?? FFprobeVideoSpeedOutputVerifier(ffprobePath: ffprobePath)
+            await markVerifying(state: state)
             try await outputVerifier.verify(request: request, outputURL: request.outputURL)
             let inputSize = fileSystem.fileSize(at: request.inputURL)
             let outputSize = fileSystem.fileSize(at: request.outputURL)
             await MainActor.run {
+                state.phase = .completed(outputURL: request.outputURL, byteCount: byteCount)
                 state.statusText = "Speed change complete"
+                state.outputURL = request.outputURL
                 state.message = EditingSuccessMessageFormatter.speedSuccessMessage(request: request, inputSize: inputSize, outputSize: outputSize)
             }
         } catch ProcessExecutionError.launchFailed(let message) {
             await fail(state: state, error: VideoEditingError.launchFailed(message))
+        } catch ProcessExecutionError.cancelled {
+            await markCancelled(state: state, outputURL: request.outputURL)
         } catch {
             await fail(state: state, error: error)
         }
+        return true
     }
 
+    @discardableResult
     public func runFrameExport(
         ffmpegPath: String,
         request: FrameExportRequest,
         state: EditingOperationState,
         verifier: (any FrameExportOutputVerifying)? = nil
-    ) async {
-        cancellationFlag.set(false)
+    ) async -> Bool {
+        guard beginOperation() else {
+            return false
+        }
+        defer { endOperation() }
 
         await MainActor.run {
             state.phase = .starting
@@ -590,36 +713,46 @@ public final class VideoEditingService: @unchecked Sendable {
             try request.validate()
             try preflightValidator.validate(ffmpegPath: ffmpegPath, inputURL: request.inputURL, outputURL: request.outputURL)
             let command = try frameExportCommand(ffmpegPath: ffmpegPath, request: request)
-            try await execute(
+            let outcome = try await execute(
                 command: command,
                 totalDuration: 1,
                 outputURL: request.outputURL,
                 state: state,
-                runningStatus: "Exporting frame...",
-                completedStatus: "Frame export complete"
+                runningStatus: "Exporting frame..."
             )
+            guard case .completed(let byteCount) = outcome else { return true }
 
             let outputVerifier = verifier ?? NativeFrameExportOutputVerifier()
+            await markVerifying(state: state)
             let imageInfo = try await outputVerifier.verify(request: request, outputURL: request.outputURL)
             let outputSize = fileSystem.fileSize(at: request.outputURL)
             await MainActor.run {
+                state.phase = .completed(outputURL: request.outputURL, byteCount: byteCount)
                 state.statusText = "Frame export complete"
+                state.outputURL = request.outputURL
                 state.message = EditingSuccessMessageFormatter.frameExportSuccessMessage(request: request, imageInfo: imageInfo, outputSize: outputSize)
             }
         } catch ProcessExecutionError.launchFailed(let message) {
             await fail(state: state, error: VideoEditingError.launchFailed(message))
+        } catch ProcessExecutionError.cancelled {
+            await markCancelled(state: state, outputURL: request.outputURL)
         } catch {
             await fail(state: state, error: error)
         }
+        return true
     }
 
+    @discardableResult
     public func runIntervalFrameExport(
         ffmpegPath: String,
         request: IntervalFrameExportRequest,
         state: EditingOperationState,
         verifier: (any IntervalFrameExportOutputVerifying)? = nil
-    ) async {
-        cancellationFlag.set(false)
+    ) async -> Bool {
+        guard beginOperation() else {
+            return false
+        }
+        defer { endOperation() }
 
         await MainActor.run {
             state.phase = .starting
@@ -668,14 +801,16 @@ public final class VideoEditingService: @unchecked Sendable {
                     state.phase = .cancelled
                     state.statusText = nil
                     state.message = "Operation cancelled."
+                    state.outputURL = nil
                 }
-                return
+                return true
             }
             guard result.exitCode == 0 else {
                 throw VideoEditingError.ffmpegExited(code: result.exitCode)
             }
 
             await MainActor.run {
+                state.phase = .verifying
                 state.statusText = "Verifying images..."
             }
             let outputVerifier = verifier ?? NativeIntervalFrameExportOutputVerifier(fileSystem: fileSystem)
@@ -688,6 +823,16 @@ public final class VideoEditingService: @unchecked Sendable {
             }
         } catch ProcessExecutionError.launchFailed(let message) {
             await fail(state: state, error: VideoEditingError.launchFailed(message))
+        } catch ProcessExecutionError.cancelled {
+            let matchingAfter = IntervalFrameExportOutputValidator.matchingFiles(
+                in: request.outputDirectoryURL,
+                request: request,
+                fileSystem: fileSystem
+            )
+            matchingAfter
+                .filter { !preexistingMatchingFiles.contains($0.path) }
+                .forEach { fileSystem.removeFile(at: $0) }
+            await markCancelled(state: state)
         } catch {
             let matchingAfter = IntervalFrameExportOutputValidator.matchingFiles(
                 in: request.outputDirectoryURL,
@@ -699,6 +844,7 @@ public final class VideoEditingService: @unchecked Sendable {
                 .forEach { fileSystem.removeFile(at: $0) }
             await fail(state: state, error: error)
         }
+        return true
     }
 
     private func ensureLibx264(ffmpegPath: String) async throws {
@@ -713,9 +859,8 @@ public final class VideoEditingService: @unchecked Sendable {
         totalDuration: TimeInterval,
         outputURL: URL,
         state: EditingOperationState,
-        runningStatus: String,
-        completedStatus: String
-    ) async throws {
+        runningStatus: String
+    ) async throws -> EditingExecutionOutcome {
         await MainActor.run {
             state.diagnostics = EditingDiagnostics(
                 ffmpegPath: command.executablePath,
@@ -763,12 +908,8 @@ public final class VideoEditingService: @unchecked Sendable {
 
         if cancellationFlag.isSet {
             fileSystem.removeFile(at: outputURL)
-            await MainActor.run {
-                state.phase = .cancelled
-                state.statusText = nil
-                state.message = "Operation cancelled."
-            }
-            return
+            await markCancelled(state: state)
+            return .cancelled
         }
 
         guard result.exitCode == 0 else {
@@ -776,13 +917,11 @@ public final class VideoEditingService: @unchecked Sendable {
         }
 
         let byteCount = try outputValidator.validateSuccessfulOutput(at: outputURL)
-
         await MainActor.run {
-            state.phase = .completed(outputURL: outputURL, byteCount: byteCount)
-            state.statusText = completedStatus
-            state.message = "Saved: \(outputURL.path)"
-            state.outputURL = outputURL
+            state.phase = .verifying
+            state.statusText = "Verifying output..."
         }
+        return .completed(byteCount: byteCount)
     }
 
     private func executeSequence(
@@ -840,9 +979,31 @@ public final class VideoEditingService: @unchecked Sendable {
     }
 
     @MainActor
+    private func markVerifying(state: EditingOperationState) {
+        state.phase = .verifying
+        state.statusText = "Verifying output..."
+    }
+
+    private func markCancelled(state: EditingOperationState, outputURL: URL? = nil) async {
+        if let outputURL {
+            fileSystem.removeFile(at: outputURL)
+        }
+        await MainActor.run {
+            state.phase = .cancelled
+            state.statusText = "Cancelled"
+            state.message = "Operation cancelled."
+            state.outputURL = nil
+        }
+    }
+
+    @MainActor
     private func fail(state: EditingOperationState, error: Error) {
+        if case .cancelled = state.phase {
+            return
+        }
         state.phase = .failed(summary: error.localizedDescription)
         state.statusText = nil
         state.message = error.localizedDescription
+        state.outputURL = nil
     }
 }

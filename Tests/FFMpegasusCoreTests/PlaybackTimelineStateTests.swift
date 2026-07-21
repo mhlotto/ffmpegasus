@@ -189,6 +189,45 @@ final class PlaybackTimelineStateTests: XCTestCase {
         XCTAssertEqual(state.displayedTimeSeconds, 0)
     }
 
+    func testOldLivePreviewCompletionDoesNotAffectNewScrubSession() {
+        var state = readyState(duration: 20)
+        state.beginScrubbing()
+        let oldPreview = state.beginLivePreviewSeek(to: 4)!
+
+        let stopSeek = state.stop()
+        XCTAssertFalse(state.completeLivePreviewSeek(generation: oldPreview.generation))
+        XCTAssertTrue(state.completeSeek(generation: stopSeek.generation, actualTime: 0))
+
+        state.beginScrubbing()
+        let newPreview = state.beginLivePreviewSeek(to: 11)!
+
+        XCTAssertFalse(state.completeLivePreviewSeek(generation: oldPreview.generation))
+        XCTAssertTrue(state.isLivePreviewSeeking)
+        XCTAssertEqual(state.displayedTimeSeconds, 11)
+
+        XCTAssertTrue(state.completeLivePreviewSeek(generation: newPreview.generation))
+        XCTAssertFalse(state.isLivePreviewSeeking)
+    }
+
+    func testInvalidatingLivePreviewPreventsOldCompletionFromClearingNewSession() {
+        var state = readyState(duration: 20)
+        state.beginScrubbing()
+        let oldPreview = state.beginLivePreviewSeek(to: 5)!
+
+        state.invalidateLivePreviewSeek()
+        XCTAssertFalse(state.isLivePreviewSeeking)
+        XCTAssertFalse(state.completeLivePreviewSeek(generation: oldPreview.generation))
+
+        state.updateScrubPosition(12)
+        let newPreview = state.beginLivePreviewSeek(to: 12)!
+
+        XCTAssertFalse(state.completeLivePreviewSeek(generation: oldPreview.generation))
+        XCTAssertTrue(state.isLivePreviewSeeking)
+        XCTAssertTrue(state.completeLivePreviewSeek(generation: newPreview.generation))
+        XCTAssertFalse(state.isLivePreviewSeeking)
+        XCTAssertEqual(state.displayedTimeSeconds, 12)
+    }
+
     func testSelectedLiveScrubbingPolicyUsesSmootherCandidate() {
         XCTAssertEqual(PlaybackScrubbingPolicy.current.previewSeekThrottleNanoseconds, 75_000_000)
         XCTAssertEqual(PlaybackScrubbingPolicy.current.previewSeekToleranceSeconds, 0.075)

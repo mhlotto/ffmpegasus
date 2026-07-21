@@ -22,6 +22,7 @@ final class AppViewModel: ObservableObject {
     private var pendingLivePreviewSeconds: TimeInterval?
     private var livePreviewTask: Task<Void, Never>?
     private var livePreviewSeekInFlight = false
+    private var livePreviewSeekGeneration: Int?
     private let liveScrubbingPolicy = PlaybackScrubbingPolicy.default
     #if DEBUG
     private(set) var liveScrubbingDiagnostics = PlaybackScrubbingDiagnostics()
@@ -80,6 +81,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func closeVideo() {
+        invalidateLivePreviewSeekWork(cancelPhysicalSeeks: true)
         removeTimeObserver()
         itemStatusObservation = nil
         if let endObserver {
@@ -93,8 +95,6 @@ final class AppViewModel: ObservableObject {
         metadata = nil
         metadataMessage = nil
         shouldResumeAfterScrub = false
-        cancelLivePreviewSeekScheduling()
-        livePreviewSeekInFlight = false
         timeline.close()
     }
 
@@ -127,8 +127,7 @@ final class AppViewModel: ObservableObject {
             return
         }
         player.pause()
-        cancelLivePreviewSeekScheduling()
-        livePreviewSeekInFlight = false
+        invalidateLivePreviewSeekWork(cancelPhysicalSeeks: true)
         let seek = timeline.stop()
         player.seek(to: seekTime(seek.target), toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
             Task { @MainActor in
@@ -148,9 +147,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func beginScrubbing() {
-        cancelLivePreviewSeekScheduling()
-        pendingLivePreviewSeconds = nil
-        livePreviewSeekInFlight = false
+        invalidateLivePreviewSeekWork(cancelPhysicalSeeks: true)
         shouldResumeAfterScrub = timeline.isPlaying
         player?.pause()
         timeline.beginScrubbing()
@@ -174,7 +171,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func endScrubbing() {
-        cancelLivePreviewSeekScheduling()
+        invalidateLivePreviewSeekWork(cancelPhysicalSeeks: true)
         guard let player, let seek = timeline.beginSeekFromScrub() else { return }
         pendingLivePreviewSeconds = nil
         let targetTime = seekTime(seek.target)
@@ -209,6 +206,7 @@ final class AppViewModel: ObservableObject {
         pendingLivePreviewSeconds = nil
         guard let seek = timeline.beginLivePreviewSeek(to: target) else { return }
         livePreviewSeekInFlight = true
+        livePreviewSeekGeneration = seek.generation
         #if DEBUG
         liveScrubbingDiagnostics.recordPreviewSeekSubmitted(
             inFlight: livePreviewSeekInFlight,
@@ -219,8 +217,19 @@ final class AppViewModel: ObservableObject {
         player.seek(to: seekTime(seek.target), toleranceBefore: tolerance, toleranceAfter: tolerance) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
-                self.livePreviewSeekInFlight = false
+                guard self.livePreviewSeekGeneration == seek.generation else {
+                    #if DEBUG
+                    self.liveScrubbingDiagnostics.recordPreviewSeekCompleted(
+                        stale: true,
+                        inFlight: self.livePreviewSeekInFlight,
+                        hasPendingTarget: self.pendingLivePreviewSeconds != nil || self.livePreviewTask != nil
+                    )
+                    #endif
+                    return
+                }
                 let completed = self.timeline.completeLivePreviewSeek(generation: seek.generation)
+                self.livePreviewSeekInFlight = false
+                self.livePreviewSeekGeneration = nil
                 #if DEBUG
                 self.liveScrubbingDiagnostics.recordPreviewSeekCompleted(
                     stale: !completed,
@@ -239,6 +248,16 @@ final class AppViewModel: ObservableObject {
         livePreviewTask?.cancel()
         livePreviewTask = nil
         pendingLivePreviewSeconds = nil
+    }
+
+    private func invalidateLivePreviewSeekWork(cancelPhysicalSeeks: Bool) {
+        cancelLivePreviewSeekScheduling()
+        livePreviewSeekInFlight = false
+        livePreviewSeekGeneration = nil
+        timeline.invalidateLivePreviewSeek()
+        if cancelPhysicalSeeks {
+            player?.currentItem?.cancelPendingSeeks()
+        }
     }
 
     private func attachTimeObserver(to player: AVPlayer) {
@@ -316,6 +335,7 @@ final class AppViewModel: ObservableObject {
                 NotificationCenter.default.removeObserver(endObserver)
             }
             livePreviewTask?.cancel()
+            player?.currentItem?.cancelPendingSeeks()
         }
     }
 }
@@ -382,10 +402,23 @@ struct ContentView: View {
     @StateObject private var operationState = EditingOperationState()
     @StateObject private var editingController = EditingOperationController()
     @State private var didRunUITestAutomation = false
+    private let testAutomation = TestAutomationConfiguration.current()
 
     var body: some View {
         VStack(spacing: 0) {
             toolbar
+
+            if operationState.phase != .idle {
+                OperationProgressView(state: operationState, onCancel: { editingController.cancel(state: operationState) })
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 12)
+                    .background(Color(nsColor: .windowBackgroundColor))
+                    .accessibilityElement(children: .contain)
+                    .accessibilityLabel(operationState.status)
+                    .accessibilityIdentifier("operation.status")
+
+                Divider()
+            }
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
@@ -421,9 +454,9 @@ struct ContentView: View {
                         onExportFramesAtIntervals: startIntervalFrameExport,
                         currentPlaybackTime: currentPlaybackTime,
                         canExportCurrentFrame: !model.isSeekingOrScrubbing,
+                        testAutomationFrameOutputURL: testAutomation.nativeXCUIMode ? testAutomation.frameOutputURL : nil,
                         onCancel: { editingController.cancel(state: operationState) }
                     )
-                    OperationProgressView(state: operationState, onCancel: { editingController.cancel(state: operationState) })
                 }
                 .padding(20)
             }
@@ -530,19 +563,17 @@ struct ContentView: View {
 
     private func runXCUITestLaunchConfigurationIfNeeded() async {
         guard !didRunUITestAutomation else { return }
-        let environment = ProcessInfo.processInfo.environment
-        guard environment["FFMPEGASUS_XCUITEST_MODE"] == "1" else { return }
+        guard testAutomation.nativeXCUIMode else { return }
         didRunUITestAutomation = true
 
-        if let fixturePath = environment["FFMPEGASUS_XCUITEST_FIXTURE"], !fixturePath.isEmpty {
-            model.loadVideo(URL(fileURLWithPath: fixturePath))
+        if let fixtureURL = testAutomation.fixtureURL {
+            model.loadVideo(fixtureURL)
         }
     }
 
     private func runUITestAutomationIfNeeded() async {
         guard !didRunUITestAutomation else { return }
-        let environment = ProcessInfo.processInfo.environment
-        guard environment["FFMPEGASUS_UI_TEST_MODE"] == "1" else { return }
+        guard testAutomation.processSmokeMode else { return }
         didRunUITestAutomation = true
 
         var result: [String: Any] = [
@@ -560,21 +591,20 @@ struct ContentView: View {
             ]
         ]
 
-        if let fixturePath = environment["FFMPEGASUS_UI_TEST_FIXTURE"], !fixturePath.isEmpty {
-            await runLoadedFixtureSmoke(fixturePath: fixturePath, environment: environment, result: &result)
+        if let fixtureURL = testAutomation.fixtureURL {
+            await runLoadedFixtureSmoke(fixtureURL: fixtureURL, result: &result)
         }
 
-        if let resultPath = environment["FFMPEGASUS_UI_TEST_RESULT"] {
-            writeUITestResult(result, to: URL(fileURLWithPath: resultPath))
+        if let resultURL = testAutomation.resultURL {
+            writeUITestResult(result, to: resultURL)
         }
 
-        if environment["FFMPEGASUS_UI_TEST_QUIT_AFTER"] == "1" {
+        if testAutomation.quitAfterAutomation {
             NSApp.terminate(nil)
         }
     }
 
-    private func runLoadedFixtureSmoke(fixturePath: String, environment: [String: String], result: inout [String: Any]) async {
-        let fixtureURL = URL(fileURLWithPath: fixturePath)
+    private func runLoadedFixtureSmoke(fixtureURL: URL, result: inout [String: Any]) async {
         model.loadVideo(fixtureURL)
         result["fixturePath"] = fixtureURL.path
 
@@ -617,12 +647,12 @@ struct ContentView: View {
         }
         result["stopReset"] = stopReset
 
-        if let outputPath = environment["FFMPEGASUS_UI_TEST_FRAME_OUTPUT"] {
-            await runFrameExportSmoke(outputPath: outputPath, result: &result)
+        if let frameOutputURL = testAutomation.frameOutputURL {
+            await runFrameExportSmoke(outputURL: frameOutputURL, result: &result)
         }
     }
 
-    private func runFrameExportSmoke(outputPath: String, result: inout [String: Any]) async {
+    private func runFrameExportSmoke(outputURL: URL, result: inout [String: Any]) async {
         guard let inputURL = model.videoURL,
               let width = model.metadata?.width,
               let height = model.metadata?.height else {
@@ -637,7 +667,6 @@ struct ContentView: View {
             abs(model.committedTime - targetTime) < 0.35
         }
 
-        let outputURL = URL(fileURLWithPath: outputPath)
         let request = FrameExportRequest(
             inputURL: inputURL,
             outputURL: outputURL,

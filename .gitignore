@@ -1,5 +1,8 @@
 add-ffmpegasus-issues.sh
 scripts
+!scripts/
+!scripts/fixtures.sh
+!scripts/ziprepo.bash
 
 # Xcode
 #

@@ -127,6 +127,12 @@ public struct PlaybackTimelineState: Equatable, Sendable {
         return (seekGeneration, target)
     }
 
+    public mutating func invalidateLivePreviewSeek() {
+        guard isLivePreviewSeeking else { return }
+        isLivePreviewSeeking = false
+        seekGeneration += 1
+    }
+
     @discardableResult
     public mutating func beginSeek(to seconds: TimeInterval) -> (generation: Int, target: TimeInterval) {
         let target = TimeFormatting.clampedPlaybackTime(seconds, duration: durationSeconds)

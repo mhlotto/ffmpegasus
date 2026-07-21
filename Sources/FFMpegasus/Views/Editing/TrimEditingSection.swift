@@ -84,8 +84,6 @@ struct TrimEditingSection: View {
                 .disabled(!operationState.isRunning)
             }
 
-            EditingInlineOperationStatus(operationState: operationState)
-
             Text("Stream-copy cuts are fast, but may align to keyframes and may not be frame-accurate.")
                 .font(.callout)
                 .foregroundStyle(.secondary)

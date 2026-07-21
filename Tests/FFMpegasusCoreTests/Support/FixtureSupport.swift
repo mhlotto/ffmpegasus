@@ -91,13 +91,13 @@ enum MediaFixtures {
 
     static func ensureGenerated() async throws {
         let manifest = try loadManifest()
-        if manifest.fixtures.allSatisfy({ FileManager.default.fileExists(atPath: url(for: $0).path) }) {
-            return
-        }
         _ = try requireTools()
 
         do {
-            try await generationCoordinator.generate(scriptURL: scriptURL)
+            try await generationCoordinator.ensureReady(
+                scriptURL: scriptURL,
+                expectedFixtureURLs: manifest.fixtures.map { url(for: $0) }
+            )
         } catch {
             XCTFail(String(describing: error))
             throw FixtureError.generationFailed
@@ -138,29 +138,85 @@ enum FixtureError: Error {
     case validationFailed
 }
 
-private actor FixtureGenerationCoordinator {
-    private var generationTask: Task<Void, Error>?
+actor FixtureGenerationCoordinator {
+    private var readinessTask: Task<Void, Error>?
+    private var validatedSignature: String?
 
-    func generate(scriptURL: URL) async throws {
-        if let generationTask {
-            try await generationTask.value
+    func ensureReady(scriptURL: URL, expectedFixtureURLs: [URL]) async throws {
+        if let readinessTask {
+            try await readinessTask.value
+            return
+        }
+        let signature = fixtureSignature(for: expectedFixtureURLs)
+        if let signature, signature == validatedSignature {
             return
         }
 
         let task = Task {
-            let result = try await ProcessRunner().run(executablePath: scriptURL.path, arguments: ["generate"])
-            guard result.exitCode == 0 else {
-                throw FixtureCommandError(message: result.stderrText.isEmpty ? result.stdoutText : result.stderrText)
+            if expectedFixtureURLs.allSatisfy({ FileManager.default.fileExists(atPath: $0.path) }) {
+                let validation = try await ProcessRunner().run(executablePath: scriptURL.path, arguments: ["validate"])
+                if validation.exitCode == 0 {
+                    return
+                }
+            }
+
+            let generation = try await ProcessRunner().run(executablePath: scriptURL.path, arguments: ["generate"])
+            guard generation.exitCode == 0 else {
+                throw FixtureCommandError(message: generation.stderrText.isEmpty ? generation.stdoutText : generation.stderrText)
             }
         }
-        generationTask = task
+        readinessTask = task
 
         do {
             try await task.value
+            readinessTask = nil
+            validatedSignature = fixtureSignature(for: expectedFixtureURLs)
         } catch {
-            generationTask = nil
+            readinessTask = nil
+            validatedSignature = nil
             throw error
         }
+    }
+
+    func generate(scriptURL: URL) async throws {
+        if let readinessTask {
+            try await readinessTask.value
+            return
+        }
+
+        let task = Task {
+            let generation = try await ProcessRunner().run(executablePath: scriptURL.path, arguments: ["generate"])
+            guard generation.exitCode == 0 else {
+                throw FixtureCommandError(message: generation.stderrText.isEmpty ? generation.stdoutText : generation.stderrText)
+            }
+        }
+        readinessTask = task
+
+        do {
+            try await task.value
+            readinessTask = nil
+            validatedSignature = nil
+        } catch {
+            readinessTask = nil
+            validatedSignature = nil
+            throw error
+        }
+    }
+
+    private func fixtureSignature(for urls: [URL]) -> String? {
+        guard !urls.isEmpty else { return nil }
+        var components: [String] = []
+        for url in urls {
+            guard
+                let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+                let size = attributes[.size] as? NSNumber,
+                let modified = attributes[.modificationDate] as? Date
+            else {
+                return nil
+            }
+            components.append("\(url.lastPathComponent):\(size.uint64Value):\(modified.timeIntervalSince1970)")
+        }
+        return components.sorted().joined(separator: "|")
     }
 }
 

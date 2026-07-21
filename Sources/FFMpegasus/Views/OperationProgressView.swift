@@ -40,7 +40,7 @@ struct OperationProgressView: View {
 
             if let message = state.message {
                 Text(message)
-                    .foregroundStyle(state.status == "Failed" ? .red : .primary)
+                    .foregroundStyle(messageColor)
                     .accessibilityIdentifier("operation.message")
             }
 
@@ -95,13 +95,28 @@ struct OperationProgressView: View {
     }
 
     private var statusColor: Color {
-        switch state.phase {
-        case .failed:
+        switch state.phase.presentationKind {
+        case .failure:
             .red
-        case .completed:
+        case .success:
             .green
-        default:
+        case .cancelled:
             .secondary
+        case .running:
+            .accentColor
+        case .neutral:
+            .secondary
+        }
+    }
+
+    private var messageColor: Color {
+        switch state.phase.presentationKind {
+        case .failure:
+            .red
+        case .cancelled:
+            .secondary
+        default:
+            .primary
         }
     }
 

@@ -1,0 +1,301 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		100000000000000000000001 /* FFMpegasusNativeXCUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000002 /* FFMpegasusNativeXCUITests.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		100000000000000000000003 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 100000000000000000000004 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 100000000000000000000005;
+			remoteInfo = FFMpegasusXCUITestHost;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		100000000000000000000002 /* FFMpegasusNativeXCUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FFMpegasusNativeXCUITests.swift; sourceTree = "<group>"; };
+		100000000000000000000006 /* FFMpegasus.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FFMpegasus.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		100000000000000000000007 /* FFMpegasusXCUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = FFMpegasusXCUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		100000000000000000000008 /* Package.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Package.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		100000000000000000000009 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		10000000000000000000000A = {
+			isa = PBXGroup;
+			children = (
+				100000000000000000000008 /* Package.swift */,
+				10000000000000000000000B /* Tests */,
+				10000000000000000000000C /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		10000000000000000000000B /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				10000000000000000000000D /* FFMpegasusXCUITests */,
+			);
+			path = Tests;
+			sourceTree = "<group>";
+		};
+		10000000000000000000000D /* FFMpegasusXCUITests */ = {
+			isa = PBXGroup;
+			children = (
+				100000000000000000000002 /* FFMpegasusNativeXCUITests.swift */,
+			);
+			path = FFMpegasusXCUITests;
+			sourceTree = "<group>";
+		};
+		10000000000000000000000C /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				100000000000000000000006 /* FFMpegasus.app */,
+				100000000000000000000007 /* FFMpegasusXCUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		100000000000000000000005 /* FFMpegasusXCUITestHost */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 10000000000000000000000E /* Build configuration list for PBXNativeTarget "FFMpegasusXCUITestHost" */;
+			buildPhases = (
+				10000000000000000000000F /* Build SwiftPM App Bundle */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = FFMpegasusXCUITestHost;
+			productName = FFMpegasus;
+			productReference = 100000000000000000000006 /* FFMpegasus.app */;
+			productType = "com.apple.product-type.application";
+		};
+		100000000000000000000010 /* FFMpegasusXCUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 100000000000000000000011 /* Build configuration list for PBXNativeTarget "FFMpegasusXCUITests" */;
+			buildPhases = (
+				100000000000000000000012 /* Sources */,
+				100000000000000000000009 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				100000000000000000000013 /* PBXTargetDependency */,
+			);
+			name = FFMpegasusXCUITests;
+			productName = FFMpegasusXCUITests;
+			productReference = 100000000000000000000007 /* FFMpegasusXCUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		100000000000000000000004 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 0;
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					100000000000000000000005 = {
+						CreatedOnToolsVersion = 16.0;
+					};
+					100000000000000000000010 = {
+						CreatedOnToolsVersion = 16.0;
+						TestTargetID = 100000000000000000000005;
+					};
+				};
+			};
+			buildConfigurationList = 100000000000000000000014 /* Build configuration list for PBXProject "FFMpegasusXCUITests" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 10000000000000000000000A;
+			productRefGroup = 10000000000000000000000C /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				100000000000000000000005 /* FFMpegasusXCUITestHost */,
+				100000000000000000000010 /* FFMpegasusXCUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		10000000000000000000000F /* Build SwiftPM App Bundle */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Build SwiftPM App Bundle";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "set -eu\ncd \"$SRCROOT\"\nexport CLANG_MODULE_CACHE_PATH=\"$SRCROOT/.build/clang-module-cache\"\nswift build --product FFMpegasus\nBIN_PATH=\"$(swift build --show-bin-path)\"\nAPP=\"$BUILT_PRODUCTS_DIR/$PRODUCT_NAME.app\"\nmkdir -p \"$APP/Contents/MacOS\" \"$APP/Contents/Resources\"\nrm -rf \"$APP/Contents/_CodeSignature\"\ncp \"$BIN_PATH/FFMpegasus\" \"$APP/Contents/MacOS/FFMpegasus\"\nchmod +x \"$APP/Contents/MacOS/FFMpegasus\"\ncodesign --force --sign - \"$APP\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		100000000000000000000012 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				100000000000000000000001 /* FFMpegasusNativeXCUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		100000000000000000000013 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 100000000000000000000005 /* FFMpegasusXCUITestHost */;
+			targetProxy = 100000000000000000000003 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		100000000000000000000015 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		100000000000000000000016 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		100000000000000000000017 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
+				MARKETING_VERSION = 1.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.ffmpegasus.xcuitesthost;
+				PRODUCT_NAME = FFMpegasus;
+				SDKROOT = macosx;
+				SKIP_INSTALL = NO;
+			};
+			name = Debug;
+		};
+		100000000000000000000018 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSPrincipalClass = NSApplication;
+				MARKETING_VERSION = 1.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.ffmpegasus.xcuitesthost;
+				PRODUCT_NAME = FFMpegasus;
+				SDKROOT = macosx;
+				SKIP_INSTALL = NO;
+			};
+			name = Release;
+		};
+		100000000000000000000019 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.ffmpegasus.xcuitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_VERSION = 6.0;
+				TEST_TARGET_NAME = FFMpegasusXCUITestHost;
+			};
+			name = Debug;
+		};
+		10000000000000000000001A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.ffmpegasus.xcuitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_VERSION = 6.0;
+				TEST_TARGET_NAME = FFMpegasusXCUITestHost;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		100000000000000000000014 /* Build configuration list for PBXProject "FFMpegasusXCUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				100000000000000000000015 /* Debug */,
+				100000000000000000000016 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		10000000000000000000000E /* Build configuration list for PBXNativeTarget "FFMpegasusXCUITestHost" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				100000000000000000000017 /* Debug */,
+				100000000000000000000018 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		100000000000000000000011 /* Build configuration list for PBXNativeTarget "FFMpegasusXCUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				100000000000000000000019 /* Debug */,
+				10000000000000000000001A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 100000000000000000000004 /* Project object */;
+}

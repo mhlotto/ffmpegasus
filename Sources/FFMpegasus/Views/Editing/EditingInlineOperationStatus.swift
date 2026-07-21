@@ -8,7 +8,7 @@ struct EditingInlineOperationStatus: View {
         switch operationState.phase {
         case .idle:
             EmptyView()
-        case .starting, .cancelling:
+        case .starting, .cancelling, .verifying:
             HStack {
                 ProgressView()
                     .controlSize(.small)
@@ -28,11 +28,11 @@ struct EditingInlineOperationStatus: View {
                     .foregroundStyle(.secondary)
             }
         case .completed:
-            Text(operationState.message ?? "Trim complete")
+            Text(operationState.message ?? "Operation complete")
                 .foregroundStyle(.green)
                 .textSelection(.enabled)
         case .failed:
-            Text(operationState.message ?? "Trim failed")
+            Text(operationState.message ?? "Operation failed")
                 .foregroundStyle(.red)
                 .textSelection(.enabled)
         case .cancelled:

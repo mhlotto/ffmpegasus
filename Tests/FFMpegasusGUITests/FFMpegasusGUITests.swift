@@ -2,12 +2,22 @@ import Foundation
 import XCTest
 
 final class FFMpegasusGUITests: XCTestCase {
+    private var temporaryDirectories: [URL] = []
+
     private var packageRoot: URL {
         var url = URL(fileURLWithPath: #filePath)
         for _ in 0..<3 {
             url.deleteLastPathComponent()
         }
         return url
+    }
+
+    override func tearDownWithError() throws {
+        for directory in temporaryDirectories {
+            try? FileManager.default.removeItem(at: directory)
+        }
+        temporaryDirectories.removeAll()
+        try super.tearDownWithError()
     }
 
     func testLaunchSmoke() throws {
@@ -142,6 +152,7 @@ final class FFMpegasusGUITests: XCTestCase {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("ffmpegasus-ui-\(name)-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        temporaryDirectories.append(url)
         return url
     }
 
