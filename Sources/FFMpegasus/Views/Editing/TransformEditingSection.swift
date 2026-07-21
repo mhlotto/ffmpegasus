@@ -1,0 +1,126 @@
+import FFMpegasusCore
+import SwiftUI
+import UniformTypeIdentifiers
+
+struct TransformEditingSection: View {
+    let inputURL: URL?
+    let duration: TimeInterval
+    let metadata: VideoMetadata?
+    @ObservedObject var operationState: EditingOperationState
+    @Binding var validationMessage: String?
+    let onTransform: (VideoTransformRequest) -> Void
+
+    @AppStorage("transformRotation") private var transformRotationRaw = VideoRotation.none.rawValue
+    @AppStorage("transformFlipHorizontal") private var transformFlipHorizontal = false
+    @AppStorage("transformFlipVertical") private var transformFlipVertical = false
+
+    private var controlsDisabled: Bool {
+        inputURL == nil || operationState.isRunning
+    }
+
+    private var transformRotation: VideoRotation {
+        get { VideoRotation(rawValue: transformRotationRaw) ?? .none }
+        nonmutating set { transformRotationRaw = newValue.rawValue }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Rotate / Flip")
+                .font(.headline)
+
+            Picker("Rotation", selection: Binding(get: { transformRotation }, set: { transformRotation = $0 })) {
+                ForEach(VideoRotation.allCases) { rotation in
+                    Text(rotation.title).tag(rotation)
+                }
+            }
+            .pickerStyle(.menu)
+            .disabled(controlsDisabled)
+
+            Toggle("Flip horizontally", isOn: $transformFlipHorizontal)
+                .disabled(controlsDisabled)
+            Toggle("Flip vertically", isOn: $transformFlipVertical)
+                .disabled(controlsDisabled)
+
+            Text(transformSummary)
+                .font(.callout)
+                .textSelection(.enabled)
+
+            Button {
+                chooseTransformOutputAndStart()
+            } label: {
+                Label(operationState.isRunning ? "Transforming..." : "Export Transformed Video", systemImage: "rotate.right")
+            }
+            .disabled(transformDisabled)
+        }
+    }
+
+    private var transformDisabled: Bool {
+        controlsDisabled || metadata?.videoCodec == nil || transformRequest(outputURL: URL(fileURLWithPath: "/tmp/output.mp4")) == nil
+    }
+
+    private var transformSummary: String {
+        guard let request = transformRequest(outputURL: URL(fileURLWithPath: "/tmp/output.mp4")) else {
+            return """
+            Rotation: \(transformRotation.title)
+            Horizontal flip: \(transformFlipHorizontal ? "Yes" : "No")
+            Vertical flip: \(transformFlipVertical ? "Yes" : "No")
+            Output: MP4 / H.264
+            Audio: unavailable
+            Expected resolution: unavailable
+            """
+        }
+        let dimensions = try? request.outputDimensions()
+        let audio = request.hasAudioStream ? "AAC 128 kbps" : "No audio"
+        return """
+        Rotation: \(request.rotation.title)
+        Horizontal flip: \(request.flipHorizontal ? "Yes" : "No")
+        Vertical flip: \(request.flipVertical ? "Yes" : "No")
+        Output: MP4 / H.264
+        Audio: \(audio)
+        Expected resolution: \(dimensions.map { "\($0.width)x\($0.height)" } ?? "unavailable")
+        """
+    }
+
+    private func chooseTransformOutputAndStart() {
+        guard let inputURL else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "mp4") ?? .mpeg4Movie]
+        panel.nameFieldStringValue = OutputFilename.transformedName(
+            for: inputURL,
+            rotation: transformRotation,
+            flipHorizontal: transformFlipHorizontal,
+            flipVertical: transformFlipVertical
+        )
+        guard panel.runModal() == .OK, let outputURL = panel.url else { return }
+        guard let request = transformRequest(outputURL: outputURL) else {
+            validationMessage = "Transformation settings are invalid."
+            return
+        }
+        validationMessage = nil
+        onTransform(request)
+    }
+
+    private func transformRequest(outputURL: URL) -> VideoTransformRequest? {
+        guard let inputURL,
+              let width = metadata?.width,
+              let height = metadata?.height else {
+            return nil
+        }
+        let request = VideoTransformRequest(
+            inputURL: inputURL,
+            outputURL: outputURL,
+            sourceDuration: duration,
+            sourceDimensions: VideoDimensions(width: width, height: height),
+            sourceRotationDegrees: metadata?.rotationDegrees,
+            hasVideoStream: metadata?.videoCodec != nil,
+            hasAudioStream: metadata?.audioCodec != nil,
+            rotation: transformRotation,
+            flipHorizontal: transformFlipHorizontal,
+            flipVertical: transformFlipVertical
+        )
+        guard (try? request.filterChain()) != nil, (try? request.outputDimensions()) != nil else {
+            return nil
+        }
+        return request
+    }
+}
