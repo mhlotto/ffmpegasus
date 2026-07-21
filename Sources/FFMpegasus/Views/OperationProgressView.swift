@@ -11,6 +11,7 @@ struct OperationProgressView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Output")
                 .font(.headline)
+                .accessibilityIdentifier("operation.progress")
 
             HStack {
                 if let progress = state.progress {
@@ -26,6 +27,7 @@ struct OperationProgressView: View {
 
                 Text(state.status)
                     .foregroundStyle(statusColor)
+                    .accessibilityIdentifier("operation.status")
 
                 Button {
                     onCancel()
@@ -33,11 +35,13 @@ struct OperationProgressView: View {
                     Label("Cancel", systemImage: "xmark")
                 }
                 .disabled(!state.isRunning)
+                .accessibilityIdentifier("operation.cancel")
             }
 
             if let message = state.message {
                 Text(message)
                     .foregroundStyle(state.status == "Failed" ? .red : .primary)
+                    .accessibilityIdentifier("operation.message")
             }
 
             if state.isRunning, let lastActivityAt = state.diagnostics.lastActivityAt, now.timeIntervalSince(lastActivityAt) > 10 {
@@ -56,12 +60,14 @@ struct OperationProgressView: View {
                     } label: {
                         Label("Reveal in Finder", systemImage: "magnifyingglass")
                     }
+                    .accessibilityIdentifier("operation.revealOutput")
 
                     Button {
                         NSWorkspace.shared.open(outputURL)
                     } label: {
                         Label("Open Output", systemImage: "play.rectangle")
                     }
+                    .accessibilityIdentifier("operation.openOutput")
                 }
             }
 

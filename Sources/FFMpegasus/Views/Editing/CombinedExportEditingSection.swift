@@ -39,6 +39,8 @@ struct CombinedExportEditingSection: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Combined Export")
                 .font(.headline)
+                .accessibilityElement(children: .ignore)
+                .accessibilityIdentifier("editing.combinedExport")
 
             Toggle("Trim", isOn: $combinedTrimEnabled)
                 .disabled(controlsDisabled)

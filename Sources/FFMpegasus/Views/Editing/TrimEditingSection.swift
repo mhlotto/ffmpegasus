@@ -35,6 +35,8 @@ struct TrimEditingSection: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Editing")
                 .font(.headline)
+                .accessibilityElement(children: .ignore)
+                .accessibilityIdentifier("editing.trim")
 
             Picker("Operation", selection: $mode) {
                 ForEach(EditingMode.allCases) { mode in

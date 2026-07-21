@@ -27,6 +27,8 @@ struct TransformEditingSection: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Rotate / Flip")
                 .font(.headline)
+                .accessibilityElement(children: .ignore)
+                .accessibilityIdentifier("editing.transform")
 
             Picker("Rotation", selection: Binding(get: { transformRotation }, set: { transformRotation = $0 })) {
                 ForEach(VideoRotation.allCases) { rotation in

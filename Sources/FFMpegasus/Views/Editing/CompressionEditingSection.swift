@@ -45,6 +45,8 @@ struct CompressionEditingSection: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Compress / Resize")
                 .font(.headline)
+                .accessibilityElement(children: .ignore)
+                .accessibilityIdentifier("editing.compression")
 
             Picker("Quality", selection: Binding(get: { compressionQuality }, set: { compressionQuality = $0 })) {
                 ForEach(CompressionQuality.allCases) { quality in

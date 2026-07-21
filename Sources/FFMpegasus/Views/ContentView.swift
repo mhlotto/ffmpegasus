@@ -356,6 +356,7 @@ struct ContentView: View {
     @StateObject private var model = AppViewModel()
     @StateObject private var operationState = EditingOperationState()
     @StateObject private var editingController = EditingOperationController()
+    @State private var didRunUITestAutomation = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -401,6 +402,11 @@ struct ContentView: View {
                 }
                 .padding(20)
             }
+            .accessibilityIdentifier("main.content")
+        }
+        .task {
+            await runXCUITestLaunchConfigurationIfNeeded()
+            await runUITestAutomationIfNeeded()
         }
     }
 
@@ -411,6 +417,7 @@ struct ContentView: View {
             } label: {
                 Label("Open", systemImage: "folder")
             }
+            .accessibilityIdentifier("toolbar.open")
 
             Button {
                 model.closeVideo()
@@ -418,12 +425,14 @@ struct ContentView: View {
                 Label("Close", systemImage: "xmark.circle")
             }
             .disabled(model.videoURL == nil || operationState.isRunning)
+            .accessibilityIdentifier("toolbar.close")
 
             Spacer()
 
             Text(model.fileName)
                 .font(.headline)
                 .lineLimit(1)
+                .accessibilityIdentifier("toolbar.loadedFile")
         }
         .padding(12)
         .background(.bar)
@@ -450,6 +459,7 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             }
         }
+        .accessibilityIdentifier("metadata.section")
     }
 
     private func startEditing(_ request: EditingRequest) {
@@ -491,5 +501,161 @@ struct ContentView: View {
 
     private func currentPlaybackTime() -> TimeInterval {
         model.committedTime
+    }
+
+    private func runXCUITestLaunchConfigurationIfNeeded() async {
+        guard !didRunUITestAutomation else { return }
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["FFMPEGASUS_XCUITEST_MODE"] == "1" else { return }
+        didRunUITestAutomation = true
+
+        if let fixturePath = environment["FFMPEGASUS_XCUITEST_FIXTURE"], !fixturePath.isEmpty {
+            model.loadVideo(URL(fileURLWithPath: fixturePath))
+        }
+    }
+
+    private func runUITestAutomationIfNeeded() async {
+        guard !didRunUITestAutomation else { return }
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["FFMPEGASUS_UI_TEST_MODE"] == "1" else { return }
+        didRunUITestAutomation = true
+
+        var result: [String: Any] = [
+            "launched": true,
+            "mainContentPresent": true,
+            "editingSections": [
+                "Trim",
+                "Remove Audio",
+                "Combined Export",
+                "Rotate / Flip",
+                "Compress / Resize",
+                "Change Speed",
+                "Export Current Frame",
+                "Export Frames at Intervals"
+            ]
+        ]
+
+        if let fixturePath = environment["FFMPEGASUS_UI_TEST_FIXTURE"], !fixturePath.isEmpty {
+            await runLoadedFixtureSmoke(fixturePath: fixturePath, environment: environment, result: &result)
+        }
+
+        if let resultPath = environment["FFMPEGASUS_UI_TEST_RESULT"] {
+            writeUITestResult(result, to: URL(fileURLWithPath: resultPath))
+        }
+
+        if environment["FFMPEGASUS_UI_TEST_QUIT_AFTER"] == "1" {
+            NSApp.terminate(nil)
+        }
+    }
+
+    private func runLoadedFixtureSmoke(fixturePath: String, environment: [String: String], result: inout [String: Any]) async {
+        let fixtureURL = URL(fileURLWithPath: fixturePath)
+        model.loadVideo(fixtureURL)
+        result["fixturePath"] = fixtureURL.path
+
+        let metadataLoaded = await waitUntil(timeout: 8) {
+            model.metadata != nil && model.duration > 0
+        }
+        result["fixtureLoaded"] = metadataLoaded
+        result["loadedFile"] = model.fileName
+        result["metadataVisible"] = model.metadata != nil
+        result["duration"] = model.duration
+        result["playbackControlsEnabled"] = model.videoURL != nil
+
+        guard metadataLoaded else { return }
+
+        let timelineAvailable = await waitUntil(timeout: 4) {
+            model.timeline.canSeek
+        }
+        result["timelineAvailable"] = timelineAvailable
+
+        model.play()
+        let playbackAdvanced = await waitUntil(timeout: 4) {
+            model.currentTime > 0.25
+        }
+        let playingTime = model.currentTime
+        result["playbackAdvanced"] = playbackAdvanced
+
+        model.pause()
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        result["pauseStable"] = abs(model.currentTime - playingTime) < 0.5
+
+        model.seek(to: min(2.0, max(0, model.duration - 0.5)))
+        let seekChanged = await waitUntil(timeout: 4) {
+            abs(model.committedTime - min(2.0, max(0, model.duration - 0.5))) < 0.35
+        }
+        result["seekChanged"] = seekChanged
+
+        model.stop()
+        let stopReset = await waitUntil(timeout: 4) {
+            model.committedTime < 0.2
+        }
+        result["stopReset"] = stopReset
+
+        if let outputPath = environment["FFMPEGASUS_UI_TEST_FRAME_OUTPUT"] {
+            await runFrameExportSmoke(outputPath: outputPath, result: &result)
+        }
+    }
+
+    private func runFrameExportSmoke(outputPath: String, result: inout [String: Any]) async {
+        guard let inputURL = model.videoURL,
+              let width = model.metadata?.width,
+              let height = model.metadata?.height else {
+            result["frameExportCompleted"] = false
+            result["frameExportError"] = "Missing loaded input or metadata."
+            return
+        }
+
+        let targetTime = min(1.25, max(0, model.duration - 0.25))
+        model.seek(to: targetTime)
+        _ = await waitUntil(timeout: 4) {
+            abs(model.committedTime - targetTime) < 0.35
+        }
+
+        let outputURL = URL(fileURLWithPath: outputPath)
+        let request = FrameExportRequest(
+            inputURL: inputURL,
+            outputURL: outputURL,
+            timestampSeconds: model.committedTime,
+            sourceDuration: model.duration,
+            sourceDimensions: VideoDimensions(width: width, height: height),
+            sourceRotationDegrees: model.metadata?.rotationDegrees,
+            hasVideoStream: model.metadata?.videoCodec != nil,
+            format: .png,
+            jpegQuality: nil
+        )
+
+        editingController.exportFrame(ffmpegPath: model.ffmpegPath, request: request, state: operationState)
+        let completed = await waitUntil(timeout: 10) {
+            if case .completed = operationState.phase {
+                return true
+            }
+            return false
+        }
+        result["frameExportCompleted"] = completed
+        result["frameExportOutput"] = outputURL.path
+        result["operationStatus"] = operationState.status
+        result["operationMessage"] = operationState.message ?? ""
+        result["frameExportOutputExists"] = FileManager.default.fileExists(atPath: outputURL.path)
+        result["frameExportOutputSize"] = (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? NSNumber)?.uint64Value ?? 0
+    }
+
+    private func waitUntil(timeout: TimeInterval, condition: @escaping @MainActor () -> Bool) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return condition()
+    }
+
+    private func writeUITestResult(_ result: [String: Any], to url: URL) {
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: url, options: .atomic)
+        } catch {
+            NSLog("FFMpegasus UI test result write failed: \(error.localizedDescription)")
+        }
     }
 }

@@ -32,6 +32,8 @@ struct SpeedEditingSection: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Change Speed")
                 .font(.headline)
+                .accessibilityElement(children: .ignore)
+                .accessibilityIdentifier("editing.speed")
 
             Picker("Speed", selection: Binding(get: { speedPreset }, set: { speedPreset = $0 })) {
                 ForEach(SpeedPreset.allCases) { preset in

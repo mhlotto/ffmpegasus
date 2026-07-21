@@ -23,20 +23,24 @@ struct PlaybackControlsView: View {
                     Label("Play", systemImage: "play.fill")
                 }
                 .disabled(!hasVideo || isPlaying)
+                .accessibilityIdentifier("playback.play")
 
                 Button(action: onPause) {
                     Label("Pause", systemImage: "pause.fill")
                 }
                 .disabled(!hasVideo || !isPlaying)
+                .accessibilityIdentifier("playback.pause")
 
                 Button(action: onStop) {
                     Label("Stop", systemImage: "stop.fill")
                 }
                 .disabled(!hasVideo)
+                .accessibilityIdentifier("playback.stop")
 
                 Text(TimeFormatting.timelineTime(currentTime))
                     .monospacedDigit()
                     .frame(width: duration >= 3600 ? 96 : 76, alignment: .trailing)
+                    .accessibilityIdentifier("playback.currentTime")
 
                 Slider(
                     value: Binding(
@@ -59,11 +63,13 @@ struct PlaybackControlsView: View {
                 )
                 .disabled(!canSeek)
                 .accessibilityLabel("Video timeline")
+                .accessibilityIdentifier("playback.timeline")
                 .accessibilityValue("\(TimeFormatting.timelineTime(currentTime)) of \(TimeFormatting.timelineTime(duration))")
 
                 Text(TimeFormatting.timelineTime(duration))
                     .monospacedDigit()
                     .frame(width: duration >= 3600 ? 96 : 76, alignment: .leading)
+                    .accessibilityIdentifier("playback.duration")
             }
             if isSeeking {
                 Text("Seeking...")

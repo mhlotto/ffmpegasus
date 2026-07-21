@@ -46,6 +46,8 @@ struct IntervalFrameExportEditingSection: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Export Frames at Intervals")
                 .font(.headline)
+                .accessibilityElement(children: .ignore)
+                .accessibilityIdentifier("editing.intervalFrameExport")
 
             Picker("Interval", selection: Binding(get: { intervalFramePreset }, set: { intervalFramePreset = $0 })) {
                 ForEach(FrameIntervalPreset.allCases) { preset in

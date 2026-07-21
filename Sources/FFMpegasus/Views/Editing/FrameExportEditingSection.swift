@@ -34,18 +34,26 @@ struct FrameExportEditingSection: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Export Current Frame")
                 .font(.headline)
+                .accessibilityElement(children: .ignore)
+                .accessibilityIdentifier("editing.frameExport")
 
             Text("Current position: \(FrameExportTimestamp.displayTime(currentPlaybackTimeForDisplay))")
                 .font(.callout)
                 .textSelection(.enabled)
 
-            Picker("Format", selection: Binding(get: { frameImageFormat }, set: { frameImageFormat = $0 })) {
+            Picker(selection: Binding(get: { frameImageFormat }, set: { frameImageFormat = $0 })) {
                 ForEach(FrameImageFormat.allCases) { format in
-                    Text(format.title).tag(format)
+                    Text(format.title)
+                        .tag(format)
+                        .accessibilityIdentifier("frameExport.format.\(format.rawValue)")
                 }
+            } label: {
+                Text("Format")
+                    .accessibilityIdentifier("frameExport.formatPicker")
             }
             .pickerStyle(.segmented)
             .disabled(controlsDisabled)
+            .accessibilityIdentifier("frameExport.formatPicker")
 
             JPEGQualityControls(
                 isVisible: frameImageFormat == .jpeg,
@@ -64,6 +72,7 @@ struct FrameExportEditingSection: View {
                 Label(operationState.isRunning ? "Exporting Frame..." : "Export Current Frame", systemImage: "photo")
             }
             .disabled(frameExportDisabled)
+            .accessibilityIdentifier("frameExport.exportButton")
         }
     }
 
@@ -72,7 +81,8 @@ struct FrameExportEditingSection: View {
     }
 
     private var frameExportDisabled: Bool {
-        controlsDisabled || metadata?.videoCodec == nil || frameJPEGQuality == nil || !canExportCurrentFrame || !(currentPlaybackTime().isFinite)
+        let hasValidQuality = frameImageFormat == .png || frameJPEGQuality != nil
+        return controlsDisabled || metadata?.videoCodec == nil || !hasValidQuality || !canExportCurrentFrame || !(currentPlaybackTime().isFinite)
     }
 
     private var frameExportSummary: String {
@@ -114,10 +124,16 @@ struct FrameExportEditingSection: View {
             return
         }
 
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [UTType(filenameExtension: frameImageFormat.fileExtension) ?? (frameImageFormat == .png ? .png : .jpeg)]
-        panel.nameFieldStringValue = OutputFilename.frameName(for: inputURL, timestamp: capturedTime, format: frameImageFormat)
-        guard panel.runModal() == .OK, let outputURL = panel.url else { return }
+        let outputURL: URL
+        if let testOutputPath = ProcessInfo.processInfo.environment["FFMPEGASUS_XCUITEST_FRAME_OUTPUT"], !testOutputPath.isEmpty {
+            outputURL = URL(fileURLWithPath: testOutputPath)
+        } else {
+            let panel = NSSavePanel()
+            panel.allowedContentTypes = [UTType(filenameExtension: frameImageFormat.fileExtension) ?? (frameImageFormat == .png ? .png : .jpeg)]
+            panel.nameFieldStringValue = OutputFilename.frameName(for: inputURL, timestamp: capturedTime, format: frameImageFormat)
+            guard panel.runModal() == .OK, let selectedURL = panel.url else { return }
+            outputURL = selectedURL
+        }
 
         guard let request = frameExportRequest(outputURL: outputURL, timestamp: capturedTime) else {
             validationMessage = "Frame export settings are invalid."

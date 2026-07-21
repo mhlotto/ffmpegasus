@@ -26,6 +26,7 @@ struct RemoveAudioEditingSection: View {
                 Label(operationState.isRunning ? "Removing Audio..." : "Remove Audio", systemImage: "speaker.slash")
             }
             .disabled(removeAudioDisabled)
+            .accessibilityIdentifier("editing.removeAudio")
 
             if metadata?.audioCodec == nil, inputURL != nil {
                 Text("This video has no audio stream.")

@@ -23,6 +23,11 @@ let package = Package(
             name: "FFMpegasusCoreTests",
             dependencies: ["FFMpegasusCore"],
             path: "Tests/FFMpegasusCoreTests"
+        ),
+        .testTarget(
+            name: "FFMpegasusGUITests",
+            path: "Tests/FFMpegasusGUITests",
+            exclude: ["README.md"]
         )
     ]
 )
