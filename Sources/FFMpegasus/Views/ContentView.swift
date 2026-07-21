@@ -22,8 +22,10 @@ final class AppViewModel: ObservableObject {
     private var pendingLivePreviewSeconds: TimeInterval?
     private var livePreviewTask: Task<Void, Never>?
     private var livePreviewSeekInFlight = false
-    private let livePreviewSeekIntervalNanoseconds: UInt64 = 75_000_000
-    private let livePreviewSeekToleranceSeconds: TimeInterval = 0.075
+    private let liveScrubbingPolicy = PlaybackScrubbingPolicy.default
+    #if DEBUG
+    private(set) var liveScrubbingDiagnostics = PlaybackScrubbingDiagnostics()
+    #endif
 
     var fileName: String {
         videoURL?.lastPathComponent ?? "No video open"
@@ -157,7 +159,17 @@ final class AppViewModel: ObservableObject {
     func updateScrubPosition(_ seconds: TimeInterval) {
         timeline.updateScrubPosition(seconds)
         guard timeline.isScrubbing else { return }
+        #if DEBUG
+        let replacedPendingTarget = pendingLivePreviewSeconds != nil
+        #endif
         pendingLivePreviewSeconds = timeline.scrubTimeSeconds
+        #if DEBUG
+        liveScrubbingDiagnostics.recordSliderUpdate(replacedPendingTarget: replacedPendingTarget)
+        liveScrubbingDiagnostics.recordPendingDepth(
+            inFlight: livePreviewSeekInFlight,
+            hasPendingTarget: pendingLivePreviewSeconds != nil || livePreviewTask != nil
+        )
+        #endif
         scheduleLivePreviewSeek()
     }
 
@@ -183,7 +195,7 @@ final class AppViewModel: ObservableObject {
         guard livePreviewTask == nil, !livePreviewSeekInFlight else { return }
         livePreviewTask = Task { [weak self] in
             guard let self else { return }
-            try? await Task.sleep(nanoseconds: livePreviewSeekIntervalNanoseconds)
+            try? await Task.sleep(nanoseconds: liveScrubbingPolicy.previewSeekThrottleNanoseconds)
             guard !Task.isCancelled else { return }
             await MainActor.run {
                 self.livePreviewTask = nil
@@ -197,12 +209,25 @@ final class AppViewModel: ObservableObject {
         pendingLivePreviewSeconds = nil
         guard let seek = timeline.beginLivePreviewSeek(to: target) else { return }
         livePreviewSeekInFlight = true
-        let tolerance = CMTime(seconds: livePreviewSeekToleranceSeconds, preferredTimescale: 600)
+        #if DEBUG
+        liveScrubbingDiagnostics.recordPreviewSeekSubmitted(
+            inFlight: livePreviewSeekInFlight,
+            hasPendingTarget: pendingLivePreviewSeconds != nil || livePreviewTask != nil
+        )
+        #endif
+        let tolerance = CMTime(seconds: liveScrubbingPolicy.previewSeekToleranceSeconds, preferredTimescale: 600)
         player.seek(to: seekTime(seek.target), toleranceBefore: tolerance, toleranceAfter: tolerance) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
                 self.livePreviewSeekInFlight = false
-                _ = self.timeline.completeLivePreviewSeek(generation: seek.generation)
+                let completed = self.timeline.completeLivePreviewSeek(generation: seek.generation)
+                #if DEBUG
+                self.liveScrubbingDiagnostics.recordPreviewSeekCompleted(
+                    stale: !completed,
+                    inFlight: self.livePreviewSeekInFlight,
+                    hasPendingTarget: self.pendingLivePreviewSeconds != nil || self.livePreviewTask != nil
+                )
+                #endif
                 if self.timeline.isScrubbing, self.pendingLivePreviewSeconds != nil {
                     self.scheduleLivePreviewSeek()
                 }

@@ -189,6 +189,43 @@ final class PlaybackTimelineStateTests: XCTestCase {
         XCTAssertEqual(state.displayedTimeSeconds, 0)
     }
 
+    func testSelectedLiveScrubbingPolicyUsesSmootherCandidate() {
+        XCTAssertEqual(PlaybackScrubbingPolicy.current.previewSeekThrottleNanoseconds, 75_000_000)
+        XCTAssertEqual(PlaybackScrubbingPolicy.current.previewSeekToleranceSeconds, 0.075)
+        XCTAssertEqual(PlaybackScrubbingPolicy.default.previewSeekThrottleNanoseconds, 50_000_000)
+        XCTAssertEqual(PlaybackScrubbingPolicy.default.previewSeekToleranceSeconds, 0.05)
+    }
+
+    func testScrubbingDiagnosticsTrackCoalescedInputAndBoundedPendingDepth() {
+        var diagnostics = PlaybackScrubbingDiagnostics()
+
+        diagnostics.recordSliderUpdate(replacedPendingTarget: false)
+        diagnostics.recordPendingDepth(inFlight: false, hasPendingTarget: true)
+        diagnostics.recordSliderUpdate(replacedPendingTarget: true)
+        diagnostics.recordSliderUpdate(replacedPendingTarget: true)
+        diagnostics.recordPreviewSeekSubmitted(inFlight: true, hasPendingTarget: false)
+        diagnostics.recordPendingDepth(inFlight: true, hasPendingTarget: true)
+        diagnostics.recordPreviewSeekCompleted(stale: false, inFlight: false, hasPendingTarget: true)
+
+        XCTAssertEqual(diagnostics.rawSliderUpdates, 3)
+        XCTAssertEqual(diagnostics.coalescedSliderUpdates, 2)
+        XCTAssertEqual(diagnostics.previewSeeksSubmitted, 1)
+        XCTAssertEqual(diagnostics.previewSeekCompletions, 1)
+        XCTAssertEqual(diagnostics.stalePreviewCompletionsIgnored, 0)
+        XCTAssertLessThanOrEqual(diagnostics.maximumPendingSeeks, 2)
+    }
+
+    func testScrubbingDiagnosticsCountStalePreviewCompletions() {
+        var diagnostics = PlaybackScrubbingDiagnostics()
+
+        diagnostics.recordPreviewSeekSubmitted(inFlight: true, hasPendingTarget: false)
+        diagnostics.recordPreviewSeekCompleted(stale: true, inFlight: false, hasPendingTarget: false)
+
+        XCTAssertEqual(diagnostics.previewSeeksSubmitted, 1)
+        XCTAssertEqual(diagnostics.previewSeekCompletions, 1)
+        XCTAssertEqual(diagnostics.stalePreviewCompletionsIgnored, 1)
+    }
+
     private func readyState(duration: TimeInterval) -> PlaybackTimelineState {
         var state = PlaybackTimelineState()
         state.open(duration: duration)
