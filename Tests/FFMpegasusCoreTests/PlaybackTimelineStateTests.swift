@@ -235,6 +235,84 @@ final class PlaybackTimelineStateTests: XCTestCase {
         XCTAssertEqual(PlaybackScrubbingPolicy.default.previewSeekToleranceSeconds, 0.05)
     }
 
+    func testPrecisionRangeCentersAroundCurrentPosition() {
+        let range = PlaybackPrecisionTimelineRange.centered(
+            around: 120,
+            durationSeconds: 3_600,
+            windowSeconds: 10
+        )
+
+        XCTAssertEqual(range.startSeconds, 115, accuracy: 0.000_001)
+        XCTAssertEqual(range.endSeconds, 125, accuracy: 0.000_001)
+        XCTAssertEqual(range.durationSeconds, 10, accuracy: 0.000_001)
+    }
+
+    func testPrecisionRangeClampsNearZeroAndEnd() {
+        let nearZero = PlaybackPrecisionTimelineRange.centered(
+            around: 2,
+            durationSeconds: 3_600,
+            windowSeconds: 10
+        )
+        XCTAssertEqual(nearZero.startSeconds, 0, accuracy: 0.000_001)
+        XCTAssertEqual(nearZero.endSeconds, 10, accuracy: 0.000_001)
+
+        let nearEnd = PlaybackPrecisionTimelineRange.centered(
+            around: 3_598,
+            durationSeconds: 3_600,
+            windowSeconds: 10
+        )
+        XCTAssertEqual(nearEnd.startSeconds, 3_590, accuracy: 0.000_001)
+        XCTAssertEqual(nearEnd.endSeconds, 3_600, accuracy: 0.000_001)
+    }
+
+    func testPrecisionRangeUsesFullDurationForVeryShortMedia() {
+        let range = PlaybackPrecisionTimelineRange.centered(
+            around: 1.5,
+            durationSeconds: 3,
+            windowSeconds: 10
+        )
+
+        XCTAssertEqual(range.startSeconds, 0, accuracy: 0.000_001)
+        XCTAssertEqual(range.endSeconds, 3, accuracy: 0.000_001)
+    }
+
+    func testPrecisionRangeMakesSubsecondAdjustmentPracticalForLongDurationMedia() {
+        var state = readyState(duration: 3_600)
+        _ = state.beginSeek(to: 1_800)
+        _ = state.completeSeek(generation: state.seekGeneration, actualTime: 1_800)
+
+        let range = state.precisionRange()
+        XCTAssertEqual(range.durationSeconds, PlaybackPrecisionTimelineRange.defaultWindowSeconds, accuracy: 0.000_001)
+        XCTAssertEqual(state.precisionStepTarget(by: PlaybackPrecisionTimelineRange.smallStepSeconds), 1_800.1, accuracy: 0.000_001)
+        XCTAssertEqual(state.precisionStepTarget(by: -PlaybackPrecisionTimelineRange.smallStepSeconds), 1_799.9, accuracy: 0.000_001)
+    }
+
+    func testCoarseSeekFollowedByFineScrubUsesLocalPrecisionRange() {
+        var state = readyState(duration: 3_600)
+        let coarseSeek = state.beginSeek(to: 2_400)
+        XCTAssertTrue(state.completeSeek(generation: coarseSeek.generation, actualTime: coarseSeek.target))
+
+        let range = state.precisionRange()
+        XCTAssertEqual(range.startSeconds, 2_395, accuracy: 0.000_001)
+        XCTAssertEqual(range.endSeconds, 2_405, accuracy: 0.000_001)
+
+        state.beginScrubbing()
+        state.updateScrubPosition(2_400.4)
+        XCTAssertEqual(state.displayedTimeSeconds, 2_400.4, accuracy: 0.000_001)
+
+        let final = state.beginSeekFromScrub()!
+        XCTAssertEqual(final.target, 2_400.4, accuracy: 0.000_001)
+    }
+
+    func testPrecisionStepClampsAtMediaBoundaries() {
+        var state = readyState(duration: 20)
+        state.applyObserverTime(0.04)
+        XCTAssertEqual(state.precisionStepTarget(by: -PlaybackPrecisionTimelineRange.smallStepSeconds), 0, accuracy: 0.000_001)
+
+        state.applyObserverTime(19.96)
+        XCTAssertEqual(state.precisionStepTarget(by: PlaybackPrecisionTimelineRange.smallStepSeconds), 20, accuracy: 0.000_001)
+    }
+
     func testScrubbingDiagnosticsTrackCoalescedInputAndBoundedPendingDepth() {
         var diagnostics = PlaybackScrubbingDiagnostics()
 

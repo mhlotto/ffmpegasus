@@ -1,5 +1,56 @@
 import Foundation
 
+public struct PlaybackPrecisionTimelineRange: Equatable, Sendable {
+    public static let defaultWindowSeconds: TimeInterval = 10
+    public static let smallStepSeconds: TimeInterval = 0.1
+
+    public let startSeconds: TimeInterval
+    public let endSeconds: TimeInterval
+
+    public init(startSeconds: TimeInterval, endSeconds: TimeInterval) {
+        let safeStart = startSeconds.isFinite ? max(0, startSeconds) : 0
+        let safeEnd = endSeconds.isFinite ? max(safeStart, endSeconds) : safeStart
+        self.startSeconds = safeStart
+        self.endSeconds = safeEnd
+    }
+
+    public var durationSeconds: TimeInterval {
+        max(0, endSeconds - startSeconds)
+    }
+
+    public static func centered(
+        around centerSeconds: TimeInterval,
+        durationSeconds: TimeInterval,
+        windowSeconds: TimeInterval = defaultWindowSeconds
+    ) -> PlaybackPrecisionTimelineRange {
+        guard TimeFormatting.isSeekableDuration(durationSeconds) else {
+            return PlaybackPrecisionTimelineRange(startSeconds: 0, endSeconds: 0)
+        }
+
+        let duration = max(0, durationSeconds)
+        let window = max(0.001, min(windowSeconds.isFinite ? windowSeconds : defaultWindowSeconds, duration))
+        let center = TimeFormatting.clampedPlaybackTime(centerSeconds, duration: duration)
+        var start = center - (window / 2)
+        var end = start + window
+
+        if start < 0 {
+            start = 0
+            end = window
+        }
+        if end > duration {
+            end = duration
+            start = max(0, end - window)
+        }
+
+        return PlaybackPrecisionTimelineRange(startSeconds: start, endSeconds: end)
+    }
+
+    public func clamped(_ seconds: TimeInterval) -> TimeInterval {
+        guard seconds.isFinite else { return startSeconds }
+        return min(max(seconds, startSeconds), endSeconds)
+    }
+}
+
 public struct PlaybackTimelineState: Equatable, Sendable {
     public private(set) var hasVideo: Bool
     public private(set) var durationSeconds: TimeInterval
@@ -46,6 +97,18 @@ public struct PlaybackTimelineState: Equatable, Sendable {
 
     public var hasPendingSeek: Bool {
         isSeeking || isLivePreviewSeeking
+    }
+
+    public func precisionRange(windowSeconds: TimeInterval = PlaybackPrecisionTimelineRange.defaultWindowSeconds) -> PlaybackPrecisionTimelineRange {
+        PlaybackPrecisionTimelineRange.centered(
+            around: displayedTimeSeconds,
+            durationSeconds: durationSeconds,
+            windowSeconds: windowSeconds
+        )
+    }
+
+    public func precisionStepTarget(by offsetSeconds: TimeInterval) -> TimeInterval {
+        TimeFormatting.clampedPlaybackTime(displayedTimeSeconds + offsetSeconds, duration: durationSeconds)
     }
 
     public mutating func open(duration: TimeInterval) {

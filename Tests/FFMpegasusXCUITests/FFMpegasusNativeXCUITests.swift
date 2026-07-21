@@ -48,6 +48,9 @@ final class FFMpegasusNativeXCUITests: XCTestCase {
         let timeline = app.sliders["playback.timeline"]
         XCTAssertTrue(timeline.exists)
         XCTAssertFalse(timeline.isEnabled)
+        let precisionTimeline = app.sliders["playback.precisionTimeline"]
+        XCTAssertTrue(precisionTimeline.exists)
+        XCTAssertFalse(precisionTimeline.isEnabled)
         XCTAssertFalse(app.alerts.firstMatch.exists)
 
         assertEditingSectionsAreDiscoverable()
@@ -60,6 +63,7 @@ final class FFMpegasusNativeXCUITests: XCTestCase {
         XCTAssertTrue(waitUntil(timeout: 10) { self.app.buttons["playback.play"].isEnabled })
         XCTAssertTrue(waitUntil(timeout: 10) { self.app.buttons["playback.stop"].isEnabled })
         XCTAssertTrue(waitUntil(timeout: 10) { self.app.sliders["playback.timeline"].isEnabled })
+        XCTAssertTrue(waitUntil(timeout: 10) { self.app.sliders["playback.precisionTimeline"].isEnabled })
 
         let duration = app.staticTexts["playback.duration"]
         XCTAssertTrue(duration.exists)
@@ -101,6 +105,32 @@ final class FFMpegasusNativeXCUITests: XCTestCase {
             let text = self.accessibleText(currentTime)
             return text != initial && text != "00:00.000"
         })
+        XCTAssertTrue(app.windows.firstMatch.exists)
+    }
+
+    func testPrecisionTimelineCanBeAdjustedThroughAccessibility() throws {
+        app = launchApp(fixtureURL: try standardFixtureURL())
+        let timeline = app.sliders["playback.timeline"]
+        let precisionTimeline = app.sliders["playback.precisionTimeline"]
+        XCTAssertTrue(waitUntil(timeout: 10) { timeline.isEnabled })
+        XCTAssertTrue(waitUntil(timeout: 10) { precisionTimeline.isEnabled })
+
+        let currentTime = app.staticTexts["playback.currentTime"]
+        timeline.adjust(toNormalizedSliderPosition: 0.45)
+        XCTAssertTrue(waitUntil(timeout: 8) {
+            let text = self.accessibleText(currentTime)
+            return text != "00:00.000"
+        })
+
+        let afterCoarseSeek = accessibleText(currentTime)
+        precisionTimeline.adjust(toNormalizedSliderPosition: 0.55)
+        XCTAssertTrue(waitUntil(timeout: 8) {
+            let text = self.accessibleText(currentTime)
+            return text != afterCoarseSeek && text != "00:00.000"
+        })
+
+        XCTAssertTrue(app.buttons["playback.precisionStepForward"].isEnabled)
+        app.buttons["playback.precisionStepForward"].click()
         XCTAssertTrue(app.windows.firstMatch.exists)
     }
 

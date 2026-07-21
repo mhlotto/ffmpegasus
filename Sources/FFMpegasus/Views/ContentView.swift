@@ -436,7 +436,8 @@ struct ContentView: View {
                         onStop: model.stop,
                         onBeginScrubbing: model.beginScrubbing,
                         onScrubChanged: model.updateScrubPosition(_:),
-                        onEndScrubbing: model.endScrubbing
+                        onEndScrubbing: model.endScrubbing,
+                        onSeek: model.seek(to:)
                     )
                     metadataSection
                     EditingView(
