@@ -392,6 +392,12 @@ final class EditingOperationController: ObservableObject {
         }
     }
 
+    func exportGIF(ffmpegPath: String, request: GIFExportRequest, state: EditingOperationState) {
+        Task {
+            await editingService.runGIFExport(ffmpegPath: ffmpegPath, request: request, state: state)
+        }
+    }
+
     func cancel(state: EditingOperationState) {
         editingService.requestCancellation(state: state)
     }
@@ -453,9 +459,11 @@ struct ContentView: View {
                         onChangeSpeed: startSpeedChange,
                         onExportFrame: startFrameExport,
                         onExportFramesAtIntervals: startIntervalFrameExport,
+                        onExportGIF: startGIFExport,
                         currentPlaybackTime: currentPlaybackTime,
                         canExportCurrentFrame: !model.isSeekingOrScrubbing,
                         testAutomationFrameOutputURL: testAutomation.nativeXCUIMode ? testAutomation.frameOutputURL : nil,
+                        testAutomationGIFOutputURL: testAutomation.nativeXCUIMode ? testAutomation.gifOutputURL : nil,
                         onCancel: { editingController.cancel(state: operationState) }
                     )
                 }
@@ -558,6 +566,10 @@ struct ContentView: View {
         editingController.exportFramesAtIntervals(ffmpegPath: model.ffmpegPath, request: request, state: operationState)
     }
 
+    private func startGIFExport(_ request: GIFExportRequest) {
+        editingController.exportGIF(ffmpegPath: model.ffmpegPath, request: request, state: operationState)
+    }
+
     private func currentPlaybackTime() -> TimeInterval {
         model.committedTime
     }
@@ -588,7 +600,8 @@ struct ContentView: View {
                 "Compress / Resize",
                 "Change Speed",
                 "Export Current Frame",
-                "Export Frames at Intervals"
+                "Export Frames at Intervals",
+                "Export GIF"
             ]
         ]
 
@@ -651,6 +664,10 @@ struct ContentView: View {
         if let frameOutputURL = testAutomation.frameOutputURL {
             await runFrameExportSmoke(outputURL: frameOutputURL, result: &result)
         }
+
+        if let gifOutputURL = testAutomation.gifOutputURL {
+            await runGIFExportSmoke(outputURL: gifOutputURL, result: &result)
+        }
     }
 
     private func runFrameExportSmoke(outputURL: URL, result: inout [String: Any]) async {
@@ -693,6 +710,51 @@ struct ContentView: View {
         result["operationMessage"] = operationState.message ?? ""
         result["frameExportOutputExists"] = FileManager.default.fileExists(atPath: outputURL.path)
         result["frameExportOutputSize"] = (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? NSNumber)?.uint64Value ?? 0
+    }
+
+    private func runGIFExportSmoke(outputURL: URL, result: inout [String: Any]) async {
+        guard let inputURL = model.videoURL,
+              let width = model.metadata?.width,
+              let height = model.metadata?.height else {
+            result["gifExportCompleted"] = false
+            result["gifExportError"] = "Missing loaded input or metadata."
+            return
+        }
+
+        do {
+            let range = try FrameExportRange(startSeconds: 0, endSeconds: min(2, model.duration), sourceDuration: model.duration)
+            let request = GIFExportRequest(
+                inputURL: inputURL,
+                outputURL: outputURL,
+                sourceDuration: model.duration,
+                sourceDimensions: VideoDimensions(width: width, height: height),
+                sourceRotationDegrees: model.metadata?.rotationDegrees,
+                hasVideoStream: model.metadata?.videoCodec != nil,
+                range: range,
+                frameRate: try GIFFrameRate(framesPerSecond: 10),
+                sizePreset: .wide320,
+                customWidth: nil,
+                quality: .balanced,
+                loopMode: .forever
+            )
+            editingController.exportGIF(ffmpegPath: model.ffmpegPath, request: request, state: operationState)
+            let completed = await waitUntil(timeout: 15) {
+                if case .completed(let completedURL, _) = operationState.phase {
+                    let size = (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? NSNumber)?.uint64Value ?? 0
+                    return completedURL == outputURL && size > 0
+                }
+                return false
+            }
+            result["gifExportCompleted"] = completed
+            result["gifExportOutput"] = outputURL.path
+            result["gifOperationStatus"] = operationState.status
+            result["gifOperationMessage"] = operationState.message ?? ""
+            result["gifExportOutputExists"] = FileManager.default.fileExists(atPath: outputURL.path)
+            result["gifExportOutputSize"] = (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? NSNumber)?.uint64Value ?? 0
+        } catch {
+            result["gifExportCompleted"] = false
+            result["gifExportError"] = error.localizedDescription
+        }
     }
 
     private func waitUntil(timeout: TimeInterval, condition: @escaping @MainActor () -> Bool) async -> Bool {

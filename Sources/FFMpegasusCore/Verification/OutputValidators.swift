@@ -427,3 +427,125 @@ public struct NativeIntervalFrameExportOutputVerifier: IntervalFrameExportOutput
         try IntervalFrameExportOutputValidator.verify(request: request, files: files, fileSystem: fileSystem)
     }
 }
+
+public enum GIFExportOutputValidator {
+    public static let fullDelayDecodeThreshold = 120
+
+    public static func verify(
+        gifURL: URL,
+        request: GIFExportRequest,
+        fileSystem: EditingFileSystemChecking = LocalEditingFileSystem()
+    ) throws -> GIFExportResult {
+        guard fileSystem.fileExists(at: gifURL),
+              let byteCount = fileSystem.fileSize(at: gifURL),
+              byteCount > 0 else {
+            throw GIFExportValidationError.invalidGIF
+        }
+        guard gifURL.pathExtension.lowercased() == "gif" else {
+            throw GIFExportValidationError.invalidGIF
+        }
+        guard let source = CGImageSourceCreateWithURL(gifURL as CFURL, nil) else {
+            throw GIFExportValidationError.invalidGIF
+        }
+        guard let imageType = CGImageSourceGetType(source),
+              (imageType as String) == UTType.gif.identifier else {
+            throw GIFExportValidationError.invalidGIF
+        }
+
+        let frameCount = CGImageSourceGetCount(source)
+        let expectedFrames = try request.estimatedFrameCount()
+        guard frameCount > 1 || expectedFrames <= 1 else {
+            throw GIFExportValidationError.singleFrameOutput
+        }
+        guard abs(frameCount - expectedFrames) <= request.frameCountTolerance else {
+            throw GIFExportValidationError.frameCountMismatch(
+                expected: expectedFrames,
+                actual: frameCount,
+                tolerance: request.frameCountTolerance
+            )
+        }
+
+        guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight] as? Int,
+              width > 0,
+              height > 0 else {
+            throw GIFExportValidationError.invalidDimensions
+        }
+        let actualDimensions = VideoDimensions(width: width, height: height)
+        let expectedDimensions = try request.outputDimensions()
+        guard actualDimensions == expectedDimensions else {
+            throw GIFExportValidationError.wrongDimensions(expected: expectedDimensions, actual: actualDimensions)
+        }
+
+        let duration = gifDuration(source: source, frameCount: frameCount)
+        if let duration {
+            let expected = request.outputDuration()
+            guard abs(duration - expected) <= request.durationTolerance else {
+                throw GIFExportValidationError.durationMismatch(expected: expected, actual: duration, tolerance: request.durationTolerance)
+            }
+        }
+
+        let loopMode = gifLoopMode(source: source)
+        if let loopMode, loopMode != request.loopMode {
+            throw GIFExportValidationError.loopMismatch(expected: request.loopMode, actual: loopMode)
+        }
+
+        return GIFExportResult(
+            frameCount: frameCount,
+            dimensions: actualDimensions,
+            duration: duration,
+            loopMode: loopMode,
+            byteCount: byteCount
+        )
+    }
+
+    private static func gifDuration(source: CGImageSource, frameCount: Int) -> TimeInterval? {
+        let sampleAll = frameCount <= fullDelayDecodeThreshold
+        let indices: [Int]
+        if sampleAll {
+            indices = Array(0..<frameCount)
+        } else {
+            indices = [0, frameCount / 2, frameCount - 1]
+        }
+        let delays = indices.compactMap { gifDelay(source: source, index: $0) }
+        guard !delays.isEmpty else { return nil }
+        let average = delays.reduce(0, +) / Double(delays.count)
+        return sampleAll ? delays.reduce(0, +) : average * Double(frameCount)
+    }
+
+    private static func gifDelay(source: CGImageSource, index: Int) -> TimeInterval? {
+        guard let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any],
+              let gifProperties = properties[kCGImagePropertyGIFDictionary] as? [CFString: Any] else {
+            return nil
+        }
+        if let unclamped = gifProperties[kCGImagePropertyGIFUnclampedDelayTime] as? NSNumber, unclamped.doubleValue > 0 {
+            return unclamped.doubleValue
+        }
+        if let delay = gifProperties[kCGImagePropertyGIFDelayTime] as? NSNumber, delay.doubleValue > 0 {
+            return delay.doubleValue
+        }
+        return nil
+    }
+
+    private static func gifLoopMode(source: CGImageSource) -> GIFLoopMode? {
+        guard let properties = CGImageSourceCopyProperties(source, nil) as? [CFString: Any],
+              let gifProperties = properties[kCGImagePropertyGIFDictionary] as? [CFString: Any],
+              let loopCount = gifProperties[kCGImagePropertyGIFLoopCount] as? NSNumber else {
+            return nil
+        }
+        return loopCount.intValue == 0 ? .forever : .once
+    }
+}
+
+public struct NativeGIFExportOutputVerifier: GIFExportOutputVerifying {
+    private let fileSystem: EditingFileSystemChecking
+
+    public init(fileSystem: EditingFileSystemChecking = LocalEditingFileSystem()) {
+        self.fileSystem = fileSystem
+    }
+
+    public func verify(request: GIFExportRequest, outputURL: URL) async throws -> GIFExportResult {
+        try GIFExportOutputValidator.verify(gifURL: outputURL, request: request, fileSystem: fileSystem)
+    }
+}

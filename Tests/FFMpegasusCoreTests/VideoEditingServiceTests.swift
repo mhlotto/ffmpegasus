@@ -178,6 +178,23 @@ struct FakeIntervalFrameExportVerifier: IntervalFrameExportOutputVerifying {
     }
 }
 
+struct FakeGIFExportVerifier: GIFExportOutputVerifying {
+    var error: Error?
+
+    func verify(request: GIFExportRequest, outputURL: URL) async throws -> GIFExportResult {
+        if let error {
+            throw error
+        }
+        return GIFExportResult(
+            frameCount: (try? request.estimatedFrameCount()) ?? 1,
+            dimensions: (try? request.outputDimensions()) ?? request.sourceDimensions,
+            duration: request.outputDuration(),
+            loopMode: request.loopMode,
+            byteCount: 2048
+        )
+    }
+}
+
 @MainActor
 final class VideoEditingServiceTests: XCTestCase {
     private let ffmpegPath = "/opt/homebrew/bin/ffmpeg"
@@ -916,6 +933,80 @@ final class VideoEditingServiceTests: XCTestCase {
         XCTAssertNil(state.outputURL)
     }
 
+    func testGIFExportSucceedsWithValidOutput() async {
+        let process = FakeEditingProcessExecutor()
+        let fileSystem = validFileSystem(outputSize: nil)
+        let request = gifExportRequest()
+        fileSystem.files.insert(request.outputURL.path)
+        fileSystem.sizes[request.outputURL.path] = 2048
+        let state = EditingOperationState()
+        let service = VideoEditingService(processExecutor: process, fileSystem: fileSystem)
+
+        await service.runGIFExport(
+            ffmpegPath: ffmpegPath,
+            request: request,
+            state: state,
+            verifier: FakeGIFExportVerifier()
+        )
+
+        XCTAssertEqual(state.phase, .completed(outputURL: gifOutputURL(), byteCount: 2048))
+        XCTAssertEqual(state.status, "GIF export complete")
+        XCTAssertEqual(state.outputURL, gifOutputURL())
+        XCTAssertEqual(process.command?.arguments.commandValue(after: "-filter_complex"), try request.filterComplex())
+        XCTAssertEqual(process.command?.arguments.commandValue(after: "-loop"), "0")
+        XCTAssertTrue(state.message?.contains("Frames") == true)
+    }
+
+    func testGIFExportVerificationFailureClearsOutputURL() async {
+        let state = await runGIFExportWith(
+            verifier: FakeGIFExportVerifier(error: GIFExportValidationError.singleFrameOutput)
+        )
+
+        guard case .failed(let summary) = state.phase else {
+            return XCTFail("Expected failed state")
+        }
+        XCTAssertTrue(summary.contains("would not produce an animation"))
+        XCTAssertNil(state.outputURL)
+    }
+
+    func testGIFExportExitZeroWithMissingOutputFails() async {
+        let state = await runGIFExportWith(outputExists: false, outputSize: nil)
+
+        guard case .failed(let summary) = state.phase else {
+            return XCTFail("Expected failed state")
+        }
+        XCTAssertTrue(summary.contains("no output file was created"))
+        XCTAssertNil(state.outputURL)
+    }
+
+    func testGIFExportCancellationRemovesIncompleteOutputAndClearsURL() async {
+        let process = FakeEditingProcessExecutor()
+        process.waitForCancel = true
+        let fileSystem = validFileSystem(outputSize: nil)
+        let request = gifExportRequest()
+        fileSystem.files.insert(request.outputURL.path)
+        fileSystem.sizes[request.outputURL.path] = 12
+        let state = EditingOperationState()
+        let service = VideoEditingService(processExecutor: process, fileSystem: fileSystem)
+
+        let task = Task {
+            await service.runGIFExport(
+                ffmpegPath: ffmpegPath,
+                request: request,
+                state: state,
+                verifier: FakeGIFExportVerifier()
+            )
+        }
+
+        try? await Task.sleep(nanoseconds: 5_000_000)
+        service.requestCancellation(state: state)
+        _ = await task.value
+
+        XCTAssertEqual(state.phase, .cancelled)
+        XCTAssertEqual(fileSystem.removedFiles, [gifOutputURL().path])
+        XCTAssertNil(state.outputURL)
+    }
+
     func testIntervalFrameExportSucceedsWithCreatedImages() async {
         let process = FakeEditingProcessExecutor()
         let fileSystem = validFileSystem(outputSize: nil)
@@ -1169,6 +1260,34 @@ final class VideoEditingServiceTests: XCTestCase {
         return state
     }
 
+    private func runGIFExportWith(
+        verifier: FakeGIFExportVerifier = FakeGIFExportVerifier(),
+        request: GIFExportRequest? = nil,
+        outputExists: Bool = true,
+        outputSize: UInt64? = 100
+    ) async -> EditingOperationState {
+        let request = request ?? gifExportRequest()
+        let fileSystem = validFileSystem(outputSize: nil)
+        if outputExists {
+            fileSystem.files.insert(request.outputURL.path)
+        }
+        if let outputSize {
+            fileSystem.sizes[request.outputURL.path] = outputSize
+        }
+        let state = EditingOperationState()
+        let service = VideoEditingService(
+            processExecutor: FakeEditingProcessExecutor(),
+            fileSystem: fileSystem
+        )
+        await service.runGIFExport(
+            ffmpegPath: ffmpegPath,
+            request: request,
+            state: state,
+            verifier: verifier
+        )
+        return state
+    }
+
     private func compressionRequest() -> CompressionRequest {
         CompressionRequest(
             inputURL: inputURL(),
@@ -1261,12 +1380,33 @@ final class VideoEditingServiceTests: XCTestCase {
         )
     }
 
+    private func gifExportRequest(outputURL: URL? = nil) -> GIFExportRequest {
+        GIFExportRequest(
+            inputURL: inputURL(),
+            outputURL: outputURL ?? gifOutputURL(),
+            sourceDuration: 10,
+            sourceDimensions: VideoDimensions(width: 640, height: 360),
+            sourceRotationDegrees: nil,
+            hasVideoStream: true,
+            range: try! FrameExportRange(startSeconds: 0, endSeconds: 2, sourceDuration: 10),
+            frameRate: try! GIFFrameRate(framesPerSecond: 10),
+            sizePreset: .wide320,
+            customWidth: nil,
+            quality: .balanced,
+            loopMode: .forever
+        )
+    }
+
     private func inputURL() -> URL {
         URL(fileURLWithPath: "/tmp/input.mov")
     }
 
     private func outputURL() -> URL {
         URL(fileURLWithPath: "/tmp/output.mov")
+    }
+
+    private func gifOutputURL() -> URL {
+        URL(fileURLWithPath: "/tmp/output.gif")
     }
 
     private func waitUntil(timeoutNanoseconds: UInt64 = 500_000_000, condition: @escaping () -> Bool) async {

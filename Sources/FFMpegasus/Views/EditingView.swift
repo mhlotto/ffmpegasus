@@ -14,9 +14,11 @@ struct EditingView: View {
     let onChangeSpeed: (VideoSpeedRequest) -> Void
     let onExportFrame: (FrameExportRequest) -> Void
     let onExportFramesAtIntervals: (IntervalFrameExportRequest) -> Void
+    let onExportGIF: (GIFExportRequest) -> Void
     let currentPlaybackTime: () -> TimeInterval
     let canExportCurrentFrame: Bool
     let testAutomationFrameOutputURL: URL?
+    let testAutomationGIFOutputURL: URL?
     let onCancel: () -> Void
 
     @State private var validationMessage: String?
@@ -119,6 +121,18 @@ struct EditingView: View {
                 operationState: operationState,
                 validationMessage: $validationMessage,
                 onExportFramesAtIntervals: onExportFramesAtIntervals
+            )
+
+            Divider()
+
+            GIFExportEditingSection(
+                inputURL: inputURL,
+                duration: duration,
+                metadata: metadata,
+                operationState: operationState,
+                validationMessage: $validationMessage,
+                testAutomationGIFOutputURL: testAutomationGIFOutputURL,
+                onExportGIF: onExportGIF
             )
         }
     }

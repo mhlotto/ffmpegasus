@@ -350,4 +350,31 @@ public extension VideoEditingService {
     func intervalFrameExportCommand(ffmpegPath: String, request: IntervalFrameExportRequest) throws -> EditingCommand {
         EditingCommand(executablePath: ffmpegPath, arguments: try intervalFrameExportArguments(for: request))
     }
+
+    func gifExportArguments(for request: GIFExportRequest) throws -> [String] {
+        try request.validate()
+        let filter = try request.filterComplex()
+        guard !filter.contains("\""), !filter.contains("'") else {
+            throw GIFExportValidationError.invalidGIF
+        }
+        return [
+            "-y",
+            "-nostdin",
+            "-ss", FrameExportTimestamp.ffmpegSeconds(request.range.startSeconds),
+            "-i", request.inputURL.path,
+            "-t", FrameExportTimestamp.ffmpegSeconds(request.range.duration),
+            "-filter_complex", filter,
+            "-loop", request.loopMode.ffmpegLoopValue,
+            "-an",
+            "-sn",
+            "-dn",
+            "-progress", "pipe:1",
+            "-nostats",
+            request.outputURL.path
+        ]
+    }
+
+    func gifExportCommand(ffmpegPath: String, request: GIFExportRequest) throws -> EditingCommand {
+        EditingCommand(executablePath: ffmpegPath, arguments: try gifExportArguments(for: request))
+    }
 }

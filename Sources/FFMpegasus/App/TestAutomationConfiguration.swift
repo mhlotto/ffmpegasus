@@ -6,6 +6,7 @@ struct TestAutomationConfiguration: Equatable {
     let resetDefaults: Bool
     let fixtureURL: URL?
     let frameOutputURL: URL?
+    let gifOutputURL: URL?
     let resultURL: URL?
     let quitAfterAutomation: Bool
 
@@ -26,6 +27,8 @@ struct TestAutomationConfiguration: Equatable {
                 ?? Self.url(from: environment["FFMPEGASUS_XCUITEST_FIXTURE"]),
             frameOutputURL: Self.url(from: environment["FFMPEGASUS_UI_TEST_FRAME_OUTPUT"])
                 ?? Self.url(from: environment["FFMPEGASUS_XCUITEST_FRAME_OUTPUT"]),
+            gifOutputURL: Self.url(from: environment["FFMPEGASUS_UI_TEST_GIF_OUTPUT"])
+                ?? Self.url(from: environment["FFMPEGASUS_XCUITEST_GIF_OUTPUT"]),
             resultURL: Self.url(from: environment["FFMPEGASUS_UI_TEST_RESULT"]),
             quitAfterAutomation: environment["FFMPEGASUS_UI_TEST_QUIT_AFTER"] == "1"
         )

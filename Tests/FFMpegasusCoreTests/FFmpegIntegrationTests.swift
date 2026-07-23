@@ -643,6 +643,67 @@ final class FFmpegIntegrationTests: XCTestCase {
         XCTAssertNotEqual(first, middle)
     }
 
+    func testOptionalFFmpegSyntheticGIFExport() async throws {
+        let tools = try MediaFixtures.requireTools()
+        try await MediaFixtures.ensureGenerated()
+        let standard = try MediaFixtures.fixture(id: "standardLandscape")
+        let portrait = try MediaFixtures.fixture(id: "portraitVideo")
+        let vfr = try MediaFixtures.fixture(id: "variableFrameRate")
+        let service = VideoEditingService()
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let basic = try gifRequest(
+            input: MediaFixtures.url(for: standard),
+            fixture: standard,
+            output: directory.appendingPathComponent("basic.gif"),
+            start: 0,
+            end: 2,
+            width: .wide320,
+            quality: .balanced,
+            loop: .forever
+        )
+        try await runGIFExport(service: service, ffmpegPath: tools.ffmpeg, request: basic)
+
+        let playOnce = try gifRequest(
+            input: MediaFixtures.url(for: standard),
+            fixture: standard,
+            output: directory.appendingPathComponent("play-once.gif"),
+            start: 1,
+            end: 3,
+            width: .wide320,
+            quality: .high,
+            loop: .once
+        )
+        try await runGIFExport(service: service, ffmpegPath: tools.ffmpeg, request: playOnce)
+
+        let portraitRequest = try gifRequest(
+            input: MediaFixtures.url(for: portrait),
+            fixture: portrait,
+            output: directory.appendingPathComponent("portrait.gif"),
+            start: 0,
+            end: 2,
+            width: .wide320,
+            quality: .smallFile,
+            loop: .forever
+        )
+        try await runGIFExport(service: service, ffmpegPath: tools.ffmpeg, request: portraitRequest)
+        XCTAssertEqual(try GIFExportOutputValidator.verify(gifURL: portraitRequest.outputURL, request: portraitRequest).dimensions, VideoDimensions(width: 180, height: 320))
+
+        let vfrRequest = try gifRequest(
+            input: MediaFixtures.url(for: vfr),
+            fixture: vfr,
+            output: directory.appendingPathComponent("vfr.gif"),
+            start: 0,
+            end: 2,
+            width: .wide320,
+            quality: .balanced,
+            loop: .forever
+        )
+        try await runGIFExport(service: service, ffmpegPath: tools.ffmpeg, request: vfrRequest)
+    }
+
     private func transformRequest(
         input: URL,
         output: URL,
@@ -778,6 +839,49 @@ final class FFmpegIntegrationTests: XCTestCase {
             jpegQuality: format == .jpeg ? try JPEGQuality(ffmpegValue: 4) : nil,
             countTolerance: 1
         )
+    }
+
+    private func gifRequest(
+        input: URL,
+        fixture: MediaFixture,
+        output: URL,
+        start: TimeInterval,
+        end: TimeInterval,
+        width: GIFSizePreset,
+        quality: GIFQualityPreset,
+        loop: GIFLoopMode
+    ) throws -> GIFExportRequest {
+        GIFExportRequest(
+            inputURL: input,
+            outputURL: output,
+            sourceDuration: fixture.durationSeconds,
+            sourceDimensions: VideoDimensions(width: fixture.codedWidth, height: fixture.codedHeight),
+            sourceRotationDegrees: fixture.rotationDegrees,
+            hasVideoStream: true,
+            range: try FrameExportRange(startSeconds: start, endSeconds: end, sourceDuration: fixture.durationSeconds),
+            frameRate: try GIFFrameRate(framesPerSecond: 10),
+            sizePreset: width,
+            customWidth: nil,
+            quality: quality,
+            loopMode: loop,
+            frameCountTolerance: 2,
+            durationTolerance: 0.45
+        )
+    }
+
+    private func runGIFExport(
+        service: VideoEditingService,
+        ffmpegPath: String,
+        request: GIFExportRequest
+    ) async throws {
+        let command = try service.gifExportCommand(ffmpegPath: ffmpegPath, request: request)
+        XCTAssertTrue(command.arguments.contains("-filter_complex"))
+        XCTAssertFalse(command.arguments.joined(separator: " ").contains("\""))
+        let result = try await ProcessRunner().run(executablePath: command.executablePath, arguments: command.arguments)
+        XCTAssertEqual(result.exitCode, 0, result.stderrText)
+        let verification = try GIFExportOutputValidator.verify(gifURL: request.outputURL, request: request)
+        XCTAssertGreaterThan(verification.frameCount, 1)
+        XCTAssertEqual(verification.dimensions, try request.outputDimensions())
     }
 
     private func runIntervalFrameExport(

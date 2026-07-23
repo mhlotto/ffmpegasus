@@ -104,6 +104,22 @@ enum EditingSuccessMessageFormatter {
         ].joined(separator: "\n")
     }
 
+    static func gifExportSuccessMessage(request: GIFExportRequest, result: GIFExportResult) -> String {
+        var lines = [
+            String(format: "Duration: %.1f seconds", result.duration ?? request.outputDuration()),
+            "Frames: \(result.frameCount)",
+            "Dimensions: \(result.dimensions.width)x\(result.dimensions.height)"
+        ]
+        if let byteCount = result.byteCount {
+            lines.append("Size: \(ByteCountFormatter.string(fromByteCount: Int64(byteCount), countStyle: .file))")
+        }
+        lines.append("Loop: \(request.loopMode == .forever ? "Forever" : "Play Once")")
+        lines.append("")
+        lines.append("Saved:")
+        lines.append(request.outputURL.path)
+        return lines.joined(separator: "\n")
+    }
+
     private static func editPlanAppliedLines(plan: VideoEditPlan) -> [String] {
         var lines: [String] = []
         if let trim = plan.trim {

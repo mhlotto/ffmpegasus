@@ -246,6 +246,10 @@ public protocol IntervalFrameExportOutputVerifying: Sendable {
     func verify(request: IntervalFrameExportRequest, files: [URL]) async throws -> IntervalFrameExportResult
 }
 
+public protocol GIFExportOutputVerifying: Sendable {
+    func verify(request: GIFExportRequest, outputURL: URL) async throws -> GIFExportResult
+}
+
 public struct FrameImageInfo: Equatable, Sendable {
     public let format: FrameImageFormat
     public let dimensions: VideoDimensions
@@ -842,6 +846,58 @@ public final class VideoEditingService: @unchecked Sendable {
             matchingAfter
                 .filter { !preexistingMatchingFiles.contains($0.path) }
                 .forEach { fileSystem.removeFile(at: $0) }
+            await fail(state: state, error: error)
+        }
+        return true
+    }
+
+    @discardableResult
+    public func runGIFExport(
+        ffmpegPath: String,
+        request: GIFExportRequest,
+        state: EditingOperationState,
+        verifier: (any GIFExportOutputVerifying)? = nil
+    ) async -> Bool {
+        guard beginOperation() else {
+            return false
+        }
+        defer { endOperation() }
+
+        await MainActor.run {
+            state.phase = .starting
+            state.statusText = "Preparing GIF export..."
+            state.message = nil
+            state.outputURL = nil
+            state.diagnostics = EditingDiagnostics(ffmpegPath: ffmpegPath, startedAt: Date(), lastActivityAt: Date())
+        }
+
+        do {
+            try request.validate()
+            try preflightValidator.validate(ffmpegPath: ffmpegPath, inputURL: request.inputURL, outputURL: request.outputURL)
+            let command = try gifExportCommand(ffmpegPath: ffmpegPath, request: request)
+            let outcome = try await execute(
+                command: command,
+                totalDuration: request.outputDuration(),
+                outputURL: request.outputURL,
+                state: state,
+                runningStatus: "Exporting GIF..."
+            )
+            guard case .completed = outcome else { return true }
+
+            let outputVerifier = verifier ?? NativeGIFExportOutputVerifier(fileSystem: fileSystem)
+            await markVerifying(state: state)
+            let result = try await outputVerifier.verify(request: request, outputURL: request.outputURL)
+            await MainActor.run {
+                state.phase = .completed(outputURL: request.outputURL, byteCount: result.byteCount ?? 0)
+                state.statusText = "GIF export complete"
+                state.outputURL = request.outputURL
+                state.message = EditingSuccessMessageFormatter.gifExportSuccessMessage(request: request, result: result)
+            }
+        } catch ProcessExecutionError.launchFailed(let message) {
+            await fail(state: state, error: VideoEditingError.launchFailed(message))
+        } catch ProcessExecutionError.cancelled {
+            await markCancelled(state: state, outputURL: request.outputURL)
+        } catch {
             await fail(state: state, error: error)
         }
         return true

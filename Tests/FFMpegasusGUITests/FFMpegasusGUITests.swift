@@ -48,12 +48,14 @@ final class FFMpegasusGUITests: XCTestCase {
         let directory = try temporaryDirectory(named: "loaded-fixture")
         let resultURL = directory.appendingPathComponent("result.json")
         let frameOutputURL = directory.appendingPathComponent("frame-smoke.png")
+        let gifOutputURL = directory.appendingPathComponent("gif-smoke.gif")
 
         let result = try launchAppAndReadResult(
             resultURL: resultURL,
             extraEnvironment: [
                 "FFMPEGASUS_UI_TEST_FIXTURE": fixtureURL.path,
-                "FFMPEGASUS_UI_TEST_FRAME_OUTPUT": frameOutputURL.path
+                "FFMPEGASUS_UI_TEST_FRAME_OUTPUT": frameOutputURL.path,
+                "FFMPEGASUS_UI_TEST_GIF_OUTPUT": gifOutputURL.path
             ]
         )
 
@@ -75,7 +77,8 @@ final class FFMpegasusGUITests: XCTestCase {
             "Compress / Resize",
             "Change Speed",
             "Export Current Frame",
-            "Export Frames at Intervals"
+            "Export Frames at Intervals",
+            "Export GIF"
         ] {
             XCTAssertTrue(sections.contains(expected), "Missing editing section: \(expected)")
         }
@@ -84,6 +87,11 @@ final class FFMpegasusGUITests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: frameOutputURL.path))
         let size = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: frameOutputURL.path)[.size] as? NSNumber)
         XCTAssertGreaterThan(size.uint64Value, 0)
+
+        XCTAssertEqual(result["gifExportCompleted"] as? Bool, true, result["gifExportError"] as? String ?? "")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: gifOutputURL.path))
+        let gifSize = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: gifOutputURL.path)[.size] as? NSNumber)
+        XCTAssertGreaterThan(gifSize.uint64Value, 0)
     }
 
     private func requireEnabled() throws {

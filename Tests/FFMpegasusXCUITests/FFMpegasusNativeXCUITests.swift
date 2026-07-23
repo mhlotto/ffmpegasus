@@ -190,7 +190,8 @@ final class FFMpegasusNativeXCUITests: XCTestCase {
             "editing.compression",
             "editing.speed",
             "editing.frameExport",
-            "editing.intervalFrameExport"
+            "editing.intervalFrameExport",
+            "editing.gifExport"
         ] {
             XCTAssertTrue(scrollToElement(element(identifier)), "Missing accessible section: \(identifier)")
         }
