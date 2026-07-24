@@ -6,6 +6,8 @@ struct CompressionEditingSection: View {
     let inputURL: URL?
     let duration: TimeInterval
     let metadata: VideoMetadata?
+    let exportProfileCapabilities: ExportProfileCapabilities?
+    let exportProfileCapabilityMessage: String?
     @ObservedObject var operationState: EditingOperationState
     @Binding var validationMessage: String?
     let onCompress: (CompressionRequest) -> Void
@@ -16,6 +18,7 @@ struct CompressionEditingSection: View {
     @AppStorage("compressionResolution") private var compressionResolutionRaw = OutputResolution.p720.rawValue
     @AppStorage("compressionCustomHeight") private var compressionCustomHeight = "720"
     @AppStorage("compressionAudioMode") private var compressionAudioModeRaw = CompressionAudioMode.keep.rawValue
+    @AppStorage("exportProfile") private var exportProfileRaw = ExportProfile.mp4H264.rawValue
 
     private var controlsDisabled: Bool {
         inputURL == nil || operationState.isRunning
@@ -39,6 +42,11 @@ struct CompressionEditingSection: View {
     private var compressionAudioMode: CompressionAudioMode {
         get { CompressionAudioMode(rawValue: compressionAudioModeRaw) ?? .keep }
         nonmutating set { compressionAudioModeRaw = newValue.rawValue }
+    }
+
+    private var exportProfile: ExportProfile {
+        get { ExportProfile(rawValue: exportProfileRaw) ?? .mp4H264 }
+        nonmutating set { exportProfileRaw = newValue.rawValue }
     }
 
     var body: some View {
@@ -72,6 +80,13 @@ struct CompressionEditingSection: View {
             Text("Lower CRF means higher quality and a larger file. Slower encoder presets usually produce better compression but take longer.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
+
+            ExportProfileSelector(
+                selectedProfile: Binding(get: { exportProfile }, set: { exportProfile = $0 }),
+                capabilities: exportProfileCapabilities,
+                capabilityMessage: exportProfileCapabilityMessage,
+                disabled: controlsDisabled
+            )
 
             Picker("Resolution", selection: Binding(get: { compressionResolution }, set: { compressionResolution = $0 })) {
                 ForEach(OutputResolution.allCases) { resolution in
@@ -115,18 +130,18 @@ struct CompressionEditingSection: View {
     }
 
     private var compressionDisabled: Bool {
-        controlsDisabled || metadata?.videoCodec == nil || compressionRequest(outputURL: URL(fileURLWithPath: "/tmp/output.mp4")) == nil
+        controlsDisabled || metadata?.videoCodec == nil || selectedProfileUnsupported || compressionRequest(outputURL: URL(fileURLWithPath: "/tmp/output.\(exportProfile.fileExtension)")) == nil
     }
 
     private var compressionSummary: String {
-        guard let request = compressionRequest(outputURL: URL(fileURLWithPath: "/tmp/output.mp4")) else {
-            return "Output: MP4 / H.264\nResolution: unavailable\nEstimated size: varies by video content"
+        guard let request = compressionRequest(outputURL: URL(fileURLWithPath: "/tmp/output.\(exportProfile.fileExtension)")) else {
+            return "Output: \(exportProfile.displayName)\nResolution: unavailable\nEstimated size: varies by video content"
         }
         let quality = (try? request.qualitySettings())
         let dimensions = try? request.outputDimensions()
-        let audio = request.hasAudioStream && request.audioMode == .keep ? "AAC 128 kbps" : "No audio"
+        let audio = request.hasAudioStream && request.audioMode == .keep ? request.exportProfile.expectedAudioCodecs.sorted().joined(separator: ", ").uppercased() : "No audio"
         return """
-        Output: MP4 / H.264
+        Output: \(request.exportProfile.displayName)
         Resolution: \(dimensions.map { "\($0.width)x\($0.height)" } ?? "Unavailable")
         Quality: \(request.quality.title), CRF \(quality?.crf ?? request.customCRF)
         Audio: \(audio)
@@ -137,8 +152,8 @@ struct CompressionEditingSection: View {
     private func chooseCompressionOutputAndStart() {
         guard let inputURL else { return }
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [UTType(filenameExtension: "mp4") ?? .mpeg4Movie]
-        panel.nameFieldStringValue = OutputFilename.compressedName(for: inputURL)
+        panel.allowedContentTypes = [UTType(filenameExtension: exportProfile.fileExtension) ?? .movie]
+        panel.nameFieldStringValue = OutputFilename.compressedName(for: inputURL, profile: exportProfile)
         guard panel.runModal() == .OK, let outputURL = panel.url else { return }
         guard let request = compressionRequest(outputURL: outputURL) else {
             validationMessage = "Compression settings are invalid."
@@ -168,11 +183,16 @@ struct CompressionEditingSection: View {
             encoderPreset: encoderPreset,
             resolution: compressionResolution,
             customHeight: customHeight,
-            audioMode: audioMode
+            audioMode: audioMode,
+            exportProfile: exportProfile
         )
         guard (try? request.qualitySettings()) != nil, (try? request.outputDimensions()) != nil else {
             return nil
         }
         return request
+    }
+
+    private var selectedProfileUnsupported: Bool {
+        exportProfileCapabilities?.support(for: exportProfile).isSupported == false
     }
 }

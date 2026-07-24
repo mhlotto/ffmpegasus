@@ -2,6 +2,27 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
+public enum ExportProfileOutputValidator {
+    public static func verify(metadata: VideoMetadata, profile: ExportProfile, outputURL: URL, expectsAudio: Bool) throws {
+        let actualExtension = outputURL.pathExtension.lowercased()
+        guard actualExtension == profile.fileExtension else {
+            throw ExportProfileValidationError.wrongExtension(expected: profile.fileExtension, actual: actualExtension)
+        }
+        if let formatName = metadata.formatName,
+           !profile.expectedFormatNames.contains(formatName) {
+            throw ExportProfileValidationError.wrongContainer(expected: profile, actual: formatName)
+        }
+        guard profile.expectedVideoCodecs.contains(metadata.videoCodec ?? "") else {
+            throw ExportProfileValidationError.wrongVideoCodec(expected: profile, actual: metadata.videoCodec)
+        }
+        if expectsAudio {
+            guard profile.expectedAudioCodecs.contains(metadata.audioCodec ?? "") else {
+                throw ExportProfileValidationError.wrongAudioCodec(expected: profile, actual: metadata.audioCodec)
+            }
+        }
+    }
+}
+
 public enum TrimOutputValidationError: LocalizedError, Equatable, Sendable {
     case missingVideoStream
     case wrongCodec(String?)
@@ -38,7 +59,7 @@ public enum TrimOutputValidator {
         }
 
         let expectedDuration = try request.trimPlan().outputDuration
-        let tolerance = request.trimExecutionMode == .accurate ? accurateDurationTolerance : fastDurationTolerance
+        let tolerance = request.effectiveTrimExecutionMode == .accurate ? accurateDurationTolerance : fastDurationTolerance
         guard abs(metadata.duration - expectedDuration) <= tolerance else {
             throw TrimOutputValidationError.durationMismatch(
                 expected: expectedDuration,
@@ -47,9 +68,10 @@ public enum TrimOutputValidator {
             )
         }
 
-        guard request.trimExecutionMode == .accurate else { return }
+        guard request.effectiveTrimExecutionMode == .accurate else { return }
 
-        guard metadata.videoCodec == "h264" else {
+        try ExportProfileOutputValidator.verify(metadata: metadata, profile: request.exportProfile, outputURL: request.outputURL, expectsAudio: request.hasAudioStream)
+        guard request.exportProfile.expectedVideoCodecs.contains(metadata.videoCodec ?? "") else {
             throw TrimOutputValidationError.wrongCodec(metadata.videoCodec)
         }
         guard let width = metadata.width, let height = metadata.height else {
@@ -59,17 +81,13 @@ public enum TrimOutputValidator {
         guard width.isMultiple(of: 2), height.isMultiple(of: 2) else {
             throw TrimOutputValidationError.oddDimensions(dimensions)
         }
-        if request.hasAudioStream {
-            guard metadata.audioCodec != nil else {
-                throw TrimOutputValidationError.missingExpectedAudio
-            }
-        }
     }
 }
 
 public enum CompressionOutputValidator {
     public static func verify(metadata: VideoMetadata, request: CompressionRequest) throws {
-        guard metadata.videoCodec == "h264" else {
+        try ExportProfileOutputValidator.verify(metadata: metadata, profile: request.exportProfile, outputURL: request.outputURL, expectsAudio: request.audioMode == .keep && request.hasAudioStream)
+        guard request.exportProfile.expectedVideoCodecs.contains(metadata.videoCodec ?? "") else {
             throw CompressionValidationError.wrongCodec(metadata.videoCodec)
         }
         guard let width = metadata.width, let height = metadata.height else {
@@ -101,7 +119,8 @@ public enum VideoTransformOutputValidator {
         guard metadata.videoCodec != nil else {
             throw VideoTransformValidationError.missingVideoStream
         }
-        guard metadata.videoCodec == "h264" else {
+        try ExportProfileOutputValidator.verify(metadata: metadata, profile: request.exportProfile, outputURL: request.outputURL, expectsAudio: request.hasAudioStream)
+        guard request.exportProfile.expectedVideoCodecs.contains(metadata.videoCodec ?? "") else {
             throw VideoTransformValidationError.wrongCodec(metadata.videoCodec)
         }
         guard let width = metadata.width, let height = metadata.height else {
@@ -154,7 +173,8 @@ public enum VideoEditPlanOutputValidator {
         }
 
         if strategy == .reencode {
-            guard metadata.videoCodec == "h264" else {
+            try ExportProfileOutputValidator.verify(metadata: metadata, profile: plan.exportProfile, outputURL: plan.outputURL, expectsAudio: plan.audioMode == .keep && plan.hasAudioStream)
+            guard plan.exportProfile.expectedVideoCodecs.contains(metadata.videoCodec ?? "") else {
                 throw VideoTransformValidationError.wrongCodec(metadata.videoCodec)
             }
             guard width.isMultiple(of: 2), height.isMultiple(of: 2) else {
@@ -179,9 +199,43 @@ public enum VideoEditPlanOutputValidator {
     }
 }
 
+public enum CropOutputValidator {
+    public static let durationTolerance: TimeInterval = 0.15
+
+    public static func verify(metadata: VideoMetadata, request: CropRequest) throws {
+        guard metadata.videoCodec != nil else {
+            throw CropValidationError.missingVideoStream
+        }
+        try ExportProfileOutputValidator.verify(metadata: metadata, profile: request.exportProfile, outputURL: request.outputURL, expectsAudio: request.hasAudioStream)
+        guard request.exportProfile.expectedVideoCodecs.contains(metadata.videoCodec ?? "") else {
+            throw CropValidationError.wrongCodec(metadata.videoCodec)
+        }
+        guard let width = metadata.width, let height = metadata.height else {
+            throw CropValidationError.invalidSourceDimensions
+        }
+        let actual = VideoDimensions(width: width, height: height)
+        let expected = try request.outputDimensions()
+        guard actual == expected else {
+            throw CropValidationError.wrongDimensions(expected: expected, actual: actual)
+        }
+        if request.hasAudioStream {
+            guard metadata.audioCodec != nil else { throw CropValidationError.missingExpectedAudio }
+        } else {
+            guard metadata.audioCodec == nil else { throw CropValidationError.unexpectedAudio }
+        }
+        guard abs(metadata.duration - request.sourceDuration) <= max(durationTolerance, request.sourceDuration * 0.01) else {
+            throw CropValidationError.durationMismatch
+        }
+        if let rotation = metadata.rotationDegrees?.normalizedRotationDegrees, rotation != 0 {
+            throw CropValidationError.staleRotationMetadata(rotation)
+        }
+    }
+}
+
 public enum VideoSpeedOutputValidator {
     public static func verify(metadata: VideoMetadata, request: VideoSpeedRequest) throws {
-        guard metadata.videoCodec == "h264" else {
+        try ExportProfileOutputValidator.verify(metadata: metadata, profile: request.exportProfile, outputURL: request.outputURL, expectsAudio: request.keepsAudio)
+        guard request.exportProfile.expectedVideoCodecs.contains(metadata.videoCodec ?? "") else {
             throw VideoSpeedValidationError.wrongCodec(metadata.videoCodec)
         }
         guard let width = metadata.width, let height = metadata.height else {
@@ -379,6 +433,19 @@ public struct FFprobeVideoTransformOutputVerifier: VideoTransformOutputVerifying
     public func verify(request: VideoTransformRequest, outputURL: URL) async throws {
         let metadata = try await FFprobeRunner().loadMetadata(ffprobePath: ffprobePath, inputURL: outputURL)
         try VideoTransformOutputValidator.verify(metadata: metadata, request: request)
+    }
+}
+
+public struct FFprobeCropOutputVerifier: CropOutputVerifying {
+    private let ffprobePath: String
+
+    public init(ffprobePath: String) {
+        self.ffprobePath = ffprobePath
+    }
+
+    public func verify(request: CropRequest, outputURL: URL) async throws {
+        let metadata = try await FFprobeRunner().loadMetadata(ffprobePath: ffprobePath, inputURL: outputURL)
+        try CropOutputValidator.verify(metadata: metadata, request: request)
     }
 }
 

@@ -2,10 +2,19 @@ import Foundation
 
 public protocol CompressionEncoderChecking: Sendable {
     func supportsLibx264(ffmpegPath: String) async throws -> Bool
+    func capabilities(ffmpegPath: String) async throws -> ExportProfileCapabilities
+}
+
+public extension CompressionEncoderChecking {
+    func capabilities(ffmpegPath: String) async throws -> ExportProfileCapabilities {
+        let supports = try await supportsLibx264(ffmpegPath: ffmpegPath)
+        return ExportProfileCapabilities(encoders: supports ? ["libx264", "aac"] : [])
+    }
 }
 
 public final class FFmpegCompressionEncoderChecker: CompressionEncoderChecking, @unchecked Sendable {
     private let libx264Support = LockedValue<[String: Bool]>([:])
+    private let capabilitySupport = LockedValue<[String: ExportProfileCapabilities]>([:])
 
     public init() {}
 
@@ -13,10 +22,25 @@ public final class FFmpegCompressionEncoderChecker: CompressionEncoderChecking, 
         if libx264Support.value[ffmpegPath] == true {
             return true
         }
-        let encoders = try await FFmpegRunner().encoders(ffmpegPath: ffmpegPath)
-        let supported = encoders.contains("libx264")
+        let capabilities = try await capabilities(ffmpegPath: ffmpegPath)
+        let supported = capabilities.encoders.contains("libx264")
         libx264Support.update { $0[ffmpegPath] = supported }
         return supported
+    }
+
+    public func capabilities(ffmpegPath: String) async throws -> ExportProfileCapabilities {
+        if let cached = capabilitySupport.value[ffmpegPath] {
+            return cached
+        }
+        let output = try await FFmpegRunner().encoders(ffmpegPath: ffmpegPath)
+        let encoders = Set(output
+            .split(whereSeparator: \.isWhitespace)
+            .map(String.init)
+            .filter { !$0.isEmpty })
+        let capabilities = ExportProfileCapabilities(encoders: encoders)
+        capabilitySupport.update { $0[ffmpegPath] = capabilities }
+        libx264Support.update { $0[ffmpegPath] = encoders.contains("libx264") }
+        return capabilities
     }
 }
 

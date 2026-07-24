@@ -6,6 +6,8 @@ struct SpeedEditingSection: View {
     let inputURL: URL?
     let duration: TimeInterval
     let metadata: VideoMetadata?
+    let exportProfileCapabilities: ExportProfileCapabilities?
+    let exportProfileCapabilityMessage: String?
     @ObservedObject var operationState: EditingOperationState
     @Binding var validationMessage: String?
     let onChangeSpeed: (VideoSpeedRequest) -> Void
@@ -13,6 +15,7 @@ struct SpeedEditingSection: View {
     @AppStorage("speedPreset") private var speedPresetRaw = SpeedPreset.x1_0.rawValue
     @AppStorage("speedCustomValue") private var speedCustomValue = "1.0"
     @AppStorage("speedAudioMode") private var speedAudioModeRaw = SpeedAudioMode.keep.rawValue
+    @AppStorage("exportProfile") private var exportProfileRaw = ExportProfile.mp4H264.rawValue
 
     private var controlsDisabled: Bool {
         inputURL == nil || operationState.isRunning
@@ -26,6 +29,11 @@ struct SpeedEditingSection: View {
     private var speedAudioMode: SpeedAudioMode {
         get { SpeedAudioMode(rawValue: speedAudioModeRaw) ?? .keep }
         nonmutating set { speedAudioModeRaw = newValue.rawValue }
+    }
+
+    private var exportProfile: ExportProfile {
+        get { ExportProfile(rawValue: exportProfileRaw) ?? .mp4H264 }
+        nonmutating set { exportProfileRaw = newValue.rawValue }
     }
 
     var body: some View {
@@ -54,6 +62,13 @@ struct SpeedEditingSection: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
+            ExportProfileSelector(
+                selectedProfile: Binding(get: { exportProfile }, set: { exportProfile = $0 }),
+                capabilities: exportProfileCapabilities,
+                capabilityMessage: exportProfileCapabilityMessage,
+                disabled: controlsDisabled
+            )
+
             Picker("Audio", selection: Binding(get: { speedAudioMode }, set: { speedAudioMode = $0 })) {
                 ForEach(SpeedAudioMode.allCases) { mode in
                     Text(mode.title).tag(mode)
@@ -81,26 +96,26 @@ struct SpeedEditingSection: View {
     }
 
     private var speedExportDisabled: Bool {
-        controlsDisabled || metadata?.videoCodec == nil || speedRequest(outputURL: URL(fileURLWithPath: "/tmp/output.mp4")) == nil
+        controlsDisabled || metadata?.videoCodec == nil || selectedProfileUnsupported || speedRequest(outputURL: URL(fileURLWithPath: "/tmp/output.\(exportProfile.fileExtension)")) == nil
     }
 
     private var speedSummary: String {
-        guard let request = speedRequest(outputURL: URL(fileURLWithPath: "/tmp/output.mp4")) else {
+        guard let request = speedRequest(outputURL: URL(fileURLWithPath: "/tmp/output.\(exportProfile.fileExtension)")) else {
             return """
             Speed: \(currentSpeedDescription)
             Original duration: \(TimeFormatting.clockTime(duration))
             Expected duration: unavailable
-            Video: H.264
+            Video: \(exportProfile.displayName)
             Audio: unavailable
             """
         }
         let expected = (try? request.expectedDuration()) ?? 0
-        let audio = request.keepsAudio ? "AAC 128 kbps" : "No audio"
+        let audio = request.keepsAudio ? request.exportProfile.expectedAudioCodecs.sorted().joined(separator: ", ").uppercased() : "No audio"
         return """
         Speed: \(request.speed.filenameLabel)
         Original duration: \(String(format: "%.1f seconds", request.sourceDuration))
         Expected duration: \(String(format: "%.1f seconds", expected))
-        Video: H.264
+        Video: \(request.exportProfile.displayName)
         Audio: \(audio)
         """
     }
@@ -125,8 +140,8 @@ struct SpeedEditingSection: View {
         }
 
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [UTType(filenameExtension: "mp4") ?? .mpeg4Movie]
-        panel.nameFieldStringValue = OutputFilename.speedName(for: inputURL, speed: speed)
+        panel.allowedContentTypes = [UTType(filenameExtension: exportProfile.fileExtension) ?? .movie]
+        panel.nameFieldStringValue = OutputFilename.speedName(for: inputURL, speed: speed, profile: exportProfile)
         guard panel.runModal() == .OK, let outputURL = panel.url else { return }
 
         guard let request = speedRequest(outputURL: outputURL) else {
@@ -158,11 +173,16 @@ struct SpeedEditingSection: View {
             hasVideoStream: metadata?.videoCodec != nil,
             hasAudioStream: metadata?.audioCodec != nil,
             speed: speed,
-            audioMode: metadata?.audioCodec == nil ? .remove : speedAudioMode
+            audioMode: metadata?.audioCodec == nil ? .remove : speedAudioMode,
+            exportProfile: exportProfile
         )
         guard (try? request.validateForExport()) != nil else {
             return nil
         }
         return request
+    }
+
+    private var selectedProfileUnsupported: Bool {
+        exportProfileCapabilities?.support(for: exportProfile).isSupported == false
     }
 }

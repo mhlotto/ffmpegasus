@@ -6,6 +6,8 @@ struct CombinedExportEditingSection: View {
     let inputURL: URL?
     let duration: TimeInterval
     let metadata: VideoMetadata?
+    let exportProfileCapabilities: ExportProfileCapabilities?
+    let exportProfileCapabilityMessage: String?
     @ObservedObject var operationState: EditingOperationState
     @Binding var validationMessage: String?
     let onExportPlan: (VideoEditPlan) -> Void
@@ -19,6 +21,16 @@ struct CombinedExportEditingSection: View {
     @State private var combinedRotation: VideoRotation = .none
     @State private var combinedFlipHorizontal = false
     @State private var combinedFlipVertical = false
+    @State private var combinedCropEnabled = false
+    @State private var combinedCropMode: CropMode = .aspectRatio
+    @State private var combinedCropAspectRatioPreset: CropAspectRatioPreset = .square
+    @State private var combinedCropPosition: CropPositionPreset = .center
+    @State private var combinedCropCustomRatioWidth = "2.39"
+    @State private var combinedCropCustomRatioHeight = "1"
+    @State private var combinedCropCustomWidth = ""
+    @State private var combinedCropCustomHeight = ""
+    @State private var combinedCropCustomX = "0"
+    @State private var combinedCropCustomY = "0"
     @State private var combinedResizeEnabled = false
     @State private var combinedResolution: OutputResolution = .original
     @State private var combinedCustomHeight = "720"
@@ -30,9 +42,15 @@ struct CombinedExportEditingSection: View {
     @State private var combinedSpeedPreset: SpeedPreset = .x1_0
     @State private var combinedCustomSpeed = "1.0"
     @State private var combinedAudioMode: ExportAudioMode = .keep
+    @AppStorage("exportProfile") private var exportProfileRaw = ExportProfile.mp4H264.rawValue
 
     private var controlsDisabled: Bool {
         inputURL == nil || operationState.isRunning
+    }
+
+    private var exportProfile: ExportProfile {
+        get { ExportProfile(rawValue: exportProfileRaw) ?? .mp4H264 }
+        nonmutating set { exportProfileRaw = newValue.rawValue }
     }
 
     var body: some View {
@@ -85,6 +103,81 @@ struct CombinedExportEditingSection: View {
                     .disabled(controlsDisabled)
                 Toggle("Flip vertically", isOn: $combinedFlipVertical)
                     .disabled(controlsDisabled)
+            }
+
+            Toggle("Crop", isOn: $combinedCropEnabled)
+                .disabled(controlsDisabled)
+            if combinedCropEnabled {
+                Picker("Crop mode", selection: $combinedCropMode) {
+                    ForEach(CropMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .disabled(controlsDisabled)
+
+                if combinedCropMode == .aspectRatio {
+                    Picker("Aspect ratio", selection: $combinedCropAspectRatioPreset) {
+                        ForEach(CropAspectRatioPreset.allCases) { ratio in
+                            Text(ratio.title).tag(ratio)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .disabled(controlsDisabled)
+
+                    if combinedCropAspectRatioPreset == .custom {
+                        HStack {
+                            TextField("Width ratio", text: $combinedCropCustomRatioWidth)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 100)
+                            Text(":")
+                            TextField("Height ratio", text: $combinedCropCustomRatioHeight)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 100)
+                        }
+                        .disabled(controlsDisabled)
+                    }
+
+                    Picker("Position", selection: $combinedCropPosition) {
+                        ForEach(CropPositionPreset.allCases) { position in
+                            Text(position.title).tag(position)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .disabled(controlsDisabled)
+
+                    if combinedCropPosition == .custom {
+                        HStack {
+                            TextField("X", text: $combinedCropCustomX)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 100)
+                            TextField("Y", text: $combinedCropCustomY)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 100)
+                        }
+                        .disabled(controlsDisabled)
+                    }
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            TextField("Width", text: $combinedCropCustomWidth)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 100)
+                            TextField("Height", text: $combinedCropCustomHeight)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 100)
+                        }
+                        HStack {
+                            TextField("X", text: $combinedCropCustomX)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 100)
+                            TextField("Y", text: $combinedCropCustomY)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 100)
+                        }
+                    }
+                    .disabled(controlsDisabled)
+                }
             }
 
             Toggle("Resize", isOn: $combinedResizeEnabled)
@@ -165,6 +258,13 @@ struct CombinedExportEditingSection: View {
                     .foregroundStyle(.secondary)
             }
 
+            ExportProfileSelector(
+                selectedProfile: Binding(get: { exportProfile }, set: { exportProfile = $0 }),
+                capabilities: exportProfileCapabilities,
+                capabilityMessage: exportProfileCapabilityMessage,
+                disabled: controlsDisabled
+            )
+
             Text(combinedSummary)
                 .font(.callout)
                 .textSelection(.enabled)
@@ -186,11 +286,11 @@ struct CombinedExportEditingSection: View {
     }
 
     private var combinedExportDisabled: Bool {
-        controlsDisabled || metadata?.videoCodec == nil || combinedPlan(outputURL: URL(fileURLWithPath: "/tmp/output.mp4")) == nil
+        controlsDisabled || metadata?.videoCodec == nil || selectedProfileUnsupported || combinedPlan(outputURL: URL(fileURLWithPath: "/tmp/output.\(exportProfile.fileExtension)")) == nil
     }
 
     private var combinedSummary: String {
-        guard let plan = combinedPlan(outputURL: URL(fileURLWithPath: "/tmp/output.mp4")) else {
+        guard let plan = combinedPlan(outputURL: URL(fileURLWithPath: "/tmp/output.\(exportProfile.fileExtension)")) else {
             return "Selected changes\nSelect at least one change."
         }
         let strategy = (try? plan.executionStrategy()) ?? .reencode
@@ -203,17 +303,22 @@ struct CombinedExportEditingSection: View {
             "Rotation: \(plan.transform?.rotation.title ?? "None")",
             "Horizontal flip: \(plan.transform?.flipHorizontal == true ? "Yes" : "No")",
             "Vertical flip: \(plan.transform?.flipVertical == true ? "Yes" : "No")",
+            "Crop: \(combinedCropDescription(plan))",
             "Resize: \(plan.resize?.resolution.title ?? "Original")",
             "Quality: \(plan.compression?.quality.title ?? "Default"), CRF \(quality?.crf ?? 20)",
             "Speed: \(plan.speed?.filenameLabel ?? "Original")",
             "Audio: \(plan.audioMode == .remove || !plan.hasAudioStream ? "Remove" : "Keep")",
             "Execution: \(strategy.title)",
-            "Output: \(strategy == .reencode ? "MP4 / H.264" : "stream copy")",
+            "Output: \(strategy == .reencode ? plan.exportProfile.displayName : "stream copy")",
             "Expected resolution: \(dimensions.map { "\($0.width)x\($0.height)" } ?? "unavailable")",
             "Expected duration: \(combinedExpectedDuration(plan))"
         ]
         if fastUpgrade {
-            lines.append("Fast Trim requires stream copy. Because other selected edits require re-encoding, this export will use accurate trimming.")
+            if plan.exportProfile.forcesReencode {
+                lines.append("Fast Trim will be re-encoded because \(plan.exportProfile.displayName) was selected.")
+            } else {
+                lines.append("Fast Trim requires stream copy. Because other selected edits require re-encoding, this export will use accurate trimming.")
+            }
         }
         return lines.joined(separator: "\n")
     }
@@ -224,15 +329,17 @@ struct CombinedExportEditingSection: View {
     }
 
     private var combinedDiagnostics: String {
-        guard let plan = combinedPlan(outputURL: URL(fileURLWithPath: "/tmp/output.mp4")),
+        guard let plan = combinedPlan(outputURL: URL(fileURLWithPath: "/tmp/output.\(exportProfile.fileExtension)")),
               let strategy = try? plan.executionStrategy() else {
             return "No valid edit plan."
         }
         let filter = (try? plan.filterChain()) ?? nil
         return """
         Execution strategy: \(strategy.title)
+        Output profile: \(plan.exportProfile.displayName)
         Filter chain: \(filter ?? "none")
         Speed filter: \(plan.speed?.videoFilter() ?? "none")
+        Crop: \(combinedCropDescription(plan))
         Audio policy: \(plan.audioMode == .remove || !plan.hasAudioStream ? "remove audio" : "keep primary audio")
         Argument array: generated after choosing an output file
         """
@@ -250,15 +357,23 @@ struct CombinedExportEditingSection: View {
         }
     }
 
+    private func combinedCropDescription(_ plan: VideoEditPlan) -> String {
+        guard let crop = plan.crop else { return "None" }
+        guard let rectangle = try? crop.resolvedRectangle(sourceDimensions: plan.dimensionsAfterTransform()) else {
+            return "Invalid"
+        }
+        return "\(rectangle.width)x\(rectangle.height) at x=\(rectangle.x), y=\(rectangle.y)"
+    }
+
     private func chooseCombinedOutputAndStart() {
         guard let inputURL else { return }
-        guard let previewPlan = combinedPlan(outputURL: URL(fileURLWithPath: "/tmp/output.mp4")),
+        guard let previewPlan = combinedPlan(outputURL: URL(fileURLWithPath: "/tmp/output.\(exportProfile.fileExtension)")),
               let strategy = try? previewPlan.executionStrategy() else {
             validationMessage = combinedValidationMessage()
             return
         }
         let panel = NSSavePanel()
-        let outputExtension = strategy == .reencode ? "mp4" : (inputURL.pathExtension.isEmpty ? "mp4" : inputURL.pathExtension)
+        let outputExtension = strategy == .reencode ? exportProfile.fileExtension : (inputURL.pathExtension.isEmpty ? "mp4" : inputURL.pathExtension)
         panel.allowedContentTypes = [UTType(filenameExtension: outputExtension) ?? .mpeg4Movie]
         panel.nameFieldStringValue = combinedOutputName(for: inputURL, strategy: strategy)
         guard panel.runModal() == .OK, let outputURL = panel.url else { return }
@@ -272,7 +387,7 @@ struct CombinedExportEditingSection: View {
 
     private func combinedOutputName(for inputURL: URL, strategy: ExportExecutionStrategy) -> String {
         let base = inputURL.deletingPathExtension().lastPathComponent
-        let ext = strategy == .reencode ? "mp4" : (inputURL.pathExtension.isEmpty ? "mp4" : inputURL.pathExtension)
+        let ext = strategy == .reencode ? exportProfile.fileExtension : (inputURL.pathExtension.isEmpty ? "mp4" : inputURL.pathExtension)
         return "\(base)-edited.\(ext)"
     }
 
@@ -283,7 +398,7 @@ struct CombinedExportEditingSection: View {
             return "Open a video before exporting changes."
         }
         do {
-            let plan = try makeCombinedPlan(inputURL: inputURL, outputURL: URL(fileURLWithPath: "/tmp/output.mp4"), width: width, height: height)
+            let plan = try makeCombinedPlan(inputURL: inputURL, outputURL: URL(fileURLWithPath: "/tmp/output.\(exportProfile.fileExtension)"), width: width, height: height)
             try plan.validate()
             return "Combined export settings are invalid."
         } catch {
@@ -321,6 +436,7 @@ struct CombinedExportEditingSection: View {
             encoderPreset: combinedEncoderPreset
         ) : nil
         let speed = try combinedSpeedConfiguration()
+        let crop = try combinedCropConfiguration()
         return VideoEditPlan(
             inputURL: inputURL,
             outputURL: outputURL,
@@ -331,11 +447,17 @@ struct CombinedExportEditingSection: View {
             hasAudioStream: metadata?.audioCodec != nil,
             trim: trim,
             transform: transform?.hasTransformation == true ? transform : nil,
+            crop: crop,
             resize: resize,
             compression: compression,
             speed: speed,
-            audioMode: metadata?.audioCodec == nil ? .remove : combinedAudioMode
+            audioMode: metadata?.audioCodec == nil ? .remove : combinedAudioMode,
+            exportProfile: exportProfile
         )
+    }
+
+    private var selectedProfileUnsupported: Bool {
+        exportProfileCapabilities?.support(for: exportProfile).isSupported == false
     }
 
     private func combinedTrimConfiguration() throws -> TrimConfiguration? {
@@ -362,5 +484,24 @@ struct CombinedExportEditingSection: View {
             throw VideoSpeedValidationError.invalidSpeed
         }
         return speed
+    }
+
+    private func combinedCropConfiguration() throws -> CropConfiguration? {
+        guard combinedCropEnabled else { return nil }
+        let ratio = CropAspectRatio.parse(width: combinedCropCustomRatioWidth, height: combinedCropCustomRatioHeight)
+        let configuration = CropConfiguration(
+            mode: combinedCropMode,
+            aspectRatioPreset: combinedCropAspectRatioPreset,
+            customAspectRatio: ratio,
+            position: combinedCropPosition,
+            customX: Int(combinedCropCustomX.trimmingCharacters(in: .whitespacesAndNewlines)),
+            customY: Int(combinedCropCustomY.trimmingCharacters(in: .whitespacesAndNewlines)),
+            customWidth: Int(combinedCropCustomWidth.trimmingCharacters(in: .whitespacesAndNewlines)),
+            customHeight: Int(combinedCropCustomHeight.trimmingCharacters(in: .whitespacesAndNewlines))
+        )
+        if combinedCropMode == .aspectRatio, combinedCropAspectRatioPreset == .custom, ratio == nil {
+            throw CropValidationError.invalidAspectRatio
+        }
+        return configuration
     }
 }

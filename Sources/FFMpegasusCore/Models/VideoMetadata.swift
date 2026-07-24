@@ -10,8 +10,9 @@ public struct VideoMetadata: Equatable, Sendable {
     public let frameRate: Double?
     public let pixelFormat: String?
     public let rotationDegrees: Int?
+    public let formatName: String?
 
-    public init(duration: TimeInterval, width: Int?, height: Int?, videoCodec: String?, audioCodec: String?, audioDuration: TimeInterval? = nil, frameRate: Double?, pixelFormat: String? = nil, rotationDegrees: Int? = nil) {
+    public init(duration: TimeInterval, width: Int?, height: Int?, videoCodec: String?, audioCodec: String?, audioDuration: TimeInterval? = nil, frameRate: Double?, pixelFormat: String? = nil, rotationDegrees: Int? = nil, formatName: String? = nil) {
         self.duration = duration
         self.width = width
         self.height = height
@@ -21,6 +22,7 @@ public struct VideoMetadata: Equatable, Sendable {
         self.frameRate = frameRate
         self.pixelFormat = pixelFormat
         self.rotationDegrees = rotationDegrees
+        self.formatName = formatName
     }
 
     public var dimensionsText: String {
@@ -47,7 +49,8 @@ public struct FFprobeResponse: Decodable, Sendable {
             audioDuration: audioStream?.durationValue ?? (audioStream == nil ? nil : format?.durationValue),
             frameRate: videoStream?.frameRateValue,
             pixelFormat: videoStream?.pixelFormat,
-            rotationDegrees: videoStream?.rotationDegrees
+            rotationDegrees: videoStream?.rotationDegrees,
+            formatName: format?.formatName
         )
     }
 }
@@ -114,6 +117,12 @@ public struct FFprobeSideData: Decodable, Sendable {
 
 public struct FFprobeFormat: Decodable, Sendable {
     public let duration: String?
+    public let formatName: String?
+
+    enum CodingKeys: String, CodingKey {
+        case duration
+        case formatName = "format_name"
+    }
 
     public var durationValue: TimeInterval? {
         duration.flatMap(TimeInterval.init)

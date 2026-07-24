@@ -12,12 +12,41 @@ FFMpegasus is a native macOS SwiftUI desktop app that wraps FFmpeg and FFprobe f
   - Remove Audio
   - Compress / Resize
   - Rotate / Flip
+  - Crop Video
   - Change Speed
   - Combined Export
+  - Export GIF
   - Export Current Frame
   - Export Frames at Intervals
 - Show operation progress, diagnostics, cancellation, output verification, Reveal in Finder, and Open Output actions.
 - Configure FFmpeg and FFprobe executable paths in Settings.
+
+## Video Export Profiles
+
+Video-producing exports default to `MP4 - H.264`, preserving the original broad-compatibility behavior. Re-encoding workflows can also use:
+
+- `MP4 - HEVC`: MP4 container, HEVC video through `libx265`, AAC audio, `yuv420p`, `hvc1` tag, and fast-start metadata.
+- `WebM - VP9`: WebM container, VP9 video through `libvpx-vp9`, Opus audio through `libopus`, and no MP4-only container options.
+- `MOV - ProRes 422`: MOV container, ProRes 422 through `prores_ks`, PCM audio, and a large-file warning.
+
+Unsupported profiles remain visible but disabled. FFMpegasus checks the configured FFmpeg executable with `ffmpeg -hide_banner -encoders` and rechecks when the FFmpeg path changes. At minimum, profile support depends on these encoders:
+
+```text
+MP4 - H.264:      libx264, aac
+MP4 - HEVC:       libx265, aac
+WebM - VP9:       libvpx-vp9, libopus
+MOV - ProRes 422: prores_ks, pcm_s16le
+```
+
+You can inspect your local encoder support manually with:
+
+```bash
+ffmpeg -hide_banner -encoders
+```
+
+H.264 keeps the existing CRF and encoder-preset behavior. HEVC and VP9 use profile-specific quality mappings with the same user-facing quality intent; ProRes uses a fixed ProRes 422 profile because it is intended for editing quality rather than small files.
+
+Fast stream-copy trim remains stream copy for the default H.264-compatible path. Choosing HEVC, VP9, or ProRes forces re-encoding and the UI explains that the export will no longer be a pure Fast Trim.
 
 ## Requirements
 

@@ -34,6 +34,20 @@ enum EditingSuccessMessageFormatter {
         return lines.joined(separator: "\n")
     }
 
+    static func cropSuccessMessage(request: CropRequest, inputSize: UInt64?, outputSize: UInt64?) -> String {
+        var lines: [String] = []
+        if let rectangle = try? request.resolvedRectangle() {
+            lines.append("Crop: \(rectangle.width)x\(rectangle.height) at x=\(rectangle.x), y=\(rectangle.y)")
+            lines.append("Output: \(rectangle.width)x\(rectangle.height)")
+        }
+        if let inputSize, let outputSize, inputSize > 0 {
+            lines.append("Original size: \(ByteCountFormatter.string(fromByteCount: Int64(inputSize), countStyle: .file))")
+            lines.append("Output size: \(ByteCountFormatter.string(fromByteCount: Int64(outputSize), countStyle: .file))")
+        }
+        lines.append("Saved: \(request.outputURL.path)")
+        return lines.joined(separator: "\n")
+    }
+
     static func editPlanSuccessMessage(plan: VideoEditPlan, inputSize: UInt64?, outputSize: UInt64?) -> String {
         var lines = ["Applied:"]
         lines += editPlanAppliedLines(plan: plan).map { "- \($0)" }
@@ -140,6 +154,9 @@ enum EditingSuccessMessageFormatter {
             if transform.flipVertical {
                 lines.append("Flipped vertically")
             }
+        }
+        if let crop = plan.crop, let rectangle = try? crop.resolvedRectangle(sourceDimensions: plan.dimensionsAfterTransform()) {
+            lines.append("Cropped to \(rectangle.width)x\(rectangle.height)")
         }
         if let resize = plan.resize {
             lines.append("Resized to \(resize.resolution.title)")

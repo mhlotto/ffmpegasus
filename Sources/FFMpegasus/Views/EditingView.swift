@@ -5,11 +5,14 @@ struct EditingView: View {
     let inputURL: URL?
     let duration: TimeInterval
     let metadata: VideoMetadata?
+    let exportProfileCapabilities: ExportProfileCapabilities?
+    let exportProfileCapabilityMessage: String?
     @ObservedObject var operationState: EditingOperationState
     let onStart: (EditingRequest) -> Void
     let onRemoveAudio: (RemoveAudioRequest) -> Void
     let onCompress: (CompressionRequest) -> Void
     let onTransform: (VideoTransformRequest) -> Void
+    let onCrop: (CropRequest) -> Void
     let onExportPlan: (VideoEditPlan) -> Void
     let onChangeSpeed: (VideoSpeedRequest) -> Void
     let onExportFrame: (FrameExportRequest) -> Void
@@ -19,6 +22,7 @@ struct EditingView: View {
     let canExportCurrentFrame: Bool
     let testAutomationFrameOutputURL: URL?
     let testAutomationGIFOutputURL: URL?
+    let testAutomationCropOutputURL: URL?
     let onCancel: () -> Void
 
     @State private var validationMessage: String?
@@ -37,6 +41,8 @@ struct EditingView: View {
                 inputURL: inputURL,
                 duration: duration,
                 metadata: metadata,
+                exportProfileCapabilities: exportProfileCapabilities,
+                exportProfileCapabilityMessage: exportProfileCapabilityMessage,
                 operationState: operationState,
                 validationMessage: $validationMessage,
                 onStart: onStart,
@@ -49,6 +55,8 @@ struct EditingView: View {
                 inputURL: inputURL,
                 duration: duration,
                 metadata: metadata,
+                exportProfileCapabilities: exportProfileCapabilities,
+                exportProfileCapabilityMessage: exportProfileCapabilityMessage,
                 operationState: operationState,
                 validationMessage: $validationMessage,
                 onRemoveAudio: onRemoveAudio
@@ -60,6 +68,8 @@ struct EditingView: View {
                 inputURL: inputURL,
                 duration: duration,
                 metadata: metadata,
+                exportProfileCapabilities: exportProfileCapabilities,
+                exportProfileCapabilityMessage: exportProfileCapabilityMessage,
                 operationState: operationState,
                 validationMessage: $validationMessage,
                 onExportPlan: onExportPlan
@@ -71,9 +81,25 @@ struct EditingView: View {
                 inputURL: inputURL,
                 duration: duration,
                 metadata: metadata,
+                exportProfileCapabilities: exportProfileCapabilities,
+                exportProfileCapabilityMessage: exportProfileCapabilityMessage,
                 operationState: operationState,
                 validationMessage: $validationMessage,
                 onTransform: onTransform
+            )
+
+            Divider()
+
+            CropEditingSection(
+                inputURL: inputURL,
+                duration: duration,
+                metadata: metadata,
+                exportProfileCapabilities: exportProfileCapabilities,
+                exportProfileCapabilityMessage: exportProfileCapabilityMessage,
+                operationState: operationState,
+                validationMessage: $validationMessage,
+                testAutomationCropOutputURL: testAutomationCropOutputURL,
+                onCrop: onCrop
             )
 
             Divider()
@@ -82,6 +108,8 @@ struct EditingView: View {
                 inputURL: inputURL,
                 duration: duration,
                 metadata: metadata,
+                exportProfileCapabilities: exportProfileCapabilities,
+                exportProfileCapabilityMessage: exportProfileCapabilityMessage,
                 operationState: operationState,
                 validationMessage: $validationMessage,
                 onCompress: onCompress
@@ -93,6 +121,8 @@ struct EditingView: View {
                 inputURL: inputURL,
                 duration: duration,
                 metadata: metadata,
+                exportProfileCapabilities: exportProfileCapabilities,
+                exportProfileCapabilityMessage: exportProfileCapabilityMessage,
                 operationState: operationState,
                 validationMessage: $validationMessage,
                 onChangeSpeed: onChangeSpeed

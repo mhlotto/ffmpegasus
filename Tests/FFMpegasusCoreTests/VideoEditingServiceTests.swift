@@ -131,6 +131,16 @@ struct FakeTransformVerifier: VideoTransformOutputVerifying {
     }
 }
 
+struct FakeCropVerifier: CropOutputVerifying {
+    var error: Error?
+
+    func verify(request: CropRequest, outputURL: URL) async throws {
+        if let error {
+            throw error
+        }
+    }
+}
+
 struct FakeEditPlanVerifier: VideoEditPlanOutputVerifying {
     var error: Error?
 
@@ -639,7 +649,8 @@ final class VideoEditingServiceTests: XCTestCase {
         guard case .failed(let summary) = state.phase else {
             return XCTFail("Expected failed state")
         }
-        XCTAssertTrue(summary.contains("Rotate / Flip requires"))
+        XCTAssertTrue(summary.contains("MP4 - H.264 requires"))
+        XCTAssertTrue(summary.contains("libx264"))
     }
 
     func testTransformOutputVerificationFailureFails() async {
@@ -683,6 +694,83 @@ final class VideoEditingServiceTests: XCTestCase {
 
         XCTAssertEqual(state.phase, .cancelled)
         XCTAssertEqual(fileSystem.removedFiles, [outputURL().path])
+    }
+
+    func testCropSucceedsWithValidOutput() async {
+        let process = FakeEditingProcessExecutor()
+        let fileSystem = validFileSystem(outputSize: 4096)
+        fileSystem.files.insert(inputURL().path)
+        fileSystem.sizes[inputURL().path] = 10_000
+        let state = EditingOperationState()
+        let service = VideoEditingService(processExecutor: process, fileSystem: fileSystem, encoderChecker: FakeEncoderChecker())
+
+        await service.runCrop(
+            ffmpegPath: ffmpegPath,
+            ffprobePath: "/opt/homebrew/bin/ffprobe",
+            request: cropRequest(),
+            state: state,
+            verifier: FakeCropVerifier()
+        )
+
+        XCTAssertEqual(state.phase, .completed(outputURL: outputURL(), byteCount: 4096))
+        XCTAssertEqual(state.status, "Crop export complete")
+        XCTAssertEqual(state.outputURL, outputURL())
+        XCTAssertEqual(process.command?.arguments.commandValue(after: "-vf"), "crop=1080:1080:420:0")
+    }
+
+    func testCropMissingLibx264Fails() async {
+        let state = await runCropWith(encoderChecker: FakeEncoderChecker(supports: false))
+
+        guard case .failed(let summary) = state.phase else {
+            return XCTFail("Expected failed state")
+        }
+        XCTAssertTrue(summary.contains("libx264"))
+        XCTAssertNil(state.outputURL)
+    }
+
+    func testCropVerificationFailureClearsOutputURL() async {
+        let state = await runCropWith(verifier: FakeCropVerifier(error: CropValidationError.wrongDimensions(expected: VideoDimensions(width: 1080, height: 1080), actual: VideoDimensions(width: 1920, height: 1080))))
+
+        guard case .failed(let summary) = state.phase else {
+            return XCTFail("Expected failed state")
+        }
+        XCTAssertTrue(summary.contains("Cropped output dimensions"))
+        XCTAssertNil(state.outputURL)
+    }
+
+    func testCropRejectsInputAndOutputPathsBeingIdentical() async {
+        let state = await runCropWith(request: cropRequest(outputURL: inputURL()))
+
+        guard case .failed(let summary) = state.phase else {
+            return XCTFail("Expected failed state")
+        }
+        XCTAssertTrue(summary.contains("different from the input"))
+    }
+
+    func testCropCancellationRemovesIncompleteOutputAndClearsURL() async {
+        let process = FakeEditingProcessExecutor()
+        process.waitForCancel = true
+        let fileSystem = validFileSystem(outputSize: 12)
+        let state = EditingOperationState()
+        let service = VideoEditingService(processExecutor: process, fileSystem: fileSystem, encoderChecker: FakeEncoderChecker())
+
+        let task = Task {
+            await service.runCrop(
+                ffmpegPath: ffmpegPath,
+                ffprobePath: "/opt/homebrew/bin/ffprobe",
+                request: cropRequest(),
+                state: state,
+                verifier: FakeCropVerifier()
+            )
+        }
+
+        try? await Task.sleep(nanoseconds: 5_000_000)
+        service.requestCancellation(state: state)
+        _ = await task.value
+
+        XCTAssertEqual(state.phase, .cancelled)
+        XCTAssertEqual(fileSystem.removedFiles, [outputURL().path])
+        XCTAssertNil(state.outputURL)
     }
 
     func testEditPlanSucceedsWithValidOutput() async {
@@ -786,7 +874,8 @@ final class VideoEditingServiceTests: XCTestCase {
         guard case .failed(let summary) = state.phase else {
             return XCTFail("Expected failed state")
         }
-        XCTAssertTrue(summary.contains("Changing speed requires"))
+        XCTAssertTrue(summary.contains("MP4 - H.264 requires"))
+        XCTAssertTrue(summary.contains("libx264"))
     }
 
     func testSpeedChangeVerificationFailureFails() async {
@@ -1197,6 +1286,27 @@ final class VideoEditingServiceTests: XCTestCase {
         return state
     }
 
+    private func runCropWith(
+        encoderChecker: FakeEncoderChecker = FakeEncoderChecker(),
+        verifier: FakeCropVerifier = FakeCropVerifier(),
+        request: CropRequest? = nil
+    ) async -> EditingOperationState {
+        let state = EditingOperationState()
+        let service = VideoEditingService(
+            processExecutor: FakeEditingProcessExecutor(),
+            fileSystem: validFileSystem(outputSize: 100),
+            encoderChecker: encoderChecker
+        )
+        await service.runCrop(
+            ffmpegPath: ffmpegPath,
+            ffprobePath: "/opt/homebrew/bin/ffprobe",
+            request: request ?? cropRequest(),
+            state: state,
+            verifier: verifier
+        )
+        return state
+    }
+
     private func runEditPlanWith(
         encoderChecker: FakeEncoderChecker = FakeEncoderChecker(),
         verifier: FakeEditPlanVerifier = FakeEditPlanVerifier(),
@@ -1320,6 +1430,29 @@ final class VideoEditingServiceTests: XCTestCase {
         )
     }
 
+    private func cropRequest(outputURL: URL? = nil, hasAudio: Bool = true) -> CropRequest {
+        let configuration = CropConfiguration(
+            mode: .aspectRatio,
+            aspectRatioPreset: .square,
+            customAspectRatio: nil,
+            position: .center,
+            customX: nil,
+            customY: nil,
+            customWidth: nil,
+            customHeight: nil
+        )
+        return CropRequest(
+            inputURL: inputURL(),
+            outputURL: outputURL ?? self.outputURL(),
+            sourceDuration: 100,
+            sourceDimensions: VideoDimensions(width: 1920, height: 1080),
+            sourceRotationDegrees: nil,
+            hasVideoStream: true,
+            hasAudioStream: hasAudio,
+            configuration: configuration
+        )
+    }
+
     private func editPlan(outputURL: URL? = nil) -> VideoEditPlan {
         VideoEditPlan(
             inputURL: inputURL(),
@@ -1402,7 +1535,7 @@ final class VideoEditingServiceTests: XCTestCase {
     }
 
     private func outputURL() -> URL {
-        URL(fileURLWithPath: "/tmp/output.mov")
+        URL(fileURLWithPath: "/tmp/output.mp4")
     }
 
     private func gifOutputURL() -> URL {

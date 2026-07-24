@@ -3,7 +3,7 @@ import Foundation
 public extension VideoEditingService {
     func streamCopyArguments(for request: EditingRequest) throws -> [String] {
         let plan = try request.trimPlan()
-        switch request.trimExecutionMode {
+        switch request.effectiveTrimExecutionMode {
         case .fast:
             return [
                 "-y",
@@ -19,6 +19,7 @@ public extension VideoEditingService {
             ]
         case .accurate:
             guard request.hasVideoStream else { throw CompressionValidationError.missingVideoStream }
+            let quality = try CompressionQualitySettings(crf: 20, preset: .medium)
             var arguments = [
                 "-y",
                 "-nostdin",
@@ -30,21 +31,12 @@ public extension VideoEditingService {
             if request.hasAudioStream {
                 arguments += ["-map", "0:a:0?"]
             }
-            arguments += [
-                "-c:v", "libx264",
-                "-preset", "medium",
-                "-crf", "20",
-                "-pix_fmt", "yuv420p"
-            ]
+            arguments += request.exportProfile.videoArguments(quality: quality)
             if request.hasAudioStream {
-                arguments += ["-c:a", "aac", "-b:a", "128k"]
+                arguments += request.exportProfile.audioArguments()
             }
-            arguments += [
-                "-movflags", "+faststart",
-                "-progress", "pipe:1",
-                "-nostats",
-                request.outputURL.path
-            ]
+            arguments += request.exportProfile.containerArguments
+            arguments += ["-progress", "pipe:1", "-nostats", request.outputURL.path]
             return arguments
         }
     }
@@ -91,25 +83,16 @@ public extension VideoEditingService {
             arguments += ["-vf", scaleFilter]
         }
 
-        arguments += [
-            "-c:v", "libx264",
-            "-preset", quality.preset.rawValue,
-            "-crf", String(quality.crf),
-            "-pix_fmt", "yuv420p"
-        ]
+        arguments += request.exportProfile.videoArguments(quality: quality)
 
         if request.audioMode == .keep, request.hasAudioStream {
-            arguments += ["-c:a", "aac", "-b:a", "128k"]
+            arguments += request.exportProfile.audioArguments()
         } else {
             arguments += ["-an"]
         }
 
-        arguments += [
-            "-movflags", "+faststart",
-            "-progress", "pipe:1",
-            "-nostats",
-            request.outputURL.path
-        ]
+        arguments += request.exportProfile.containerArguments
+        arguments += ["-progress", "pipe:1", "-nostats", request.outputURL.path]
         return arguments
     }
 
@@ -135,33 +118,68 @@ public extension VideoEditingService {
             arguments += ["-map", "0:a:0?"]
         }
 
-        arguments += [
-            "-vf", filterChain,
-            "-c:v", "libx264",
-            "-preset", "medium",
-            "-crf", "20",
-            "-pix_fmt", "yuv420p"
-        ]
+        let quality = try CompressionQualitySettings(crf: 20, preset: .medium)
+        arguments += ["-vf", filterChain]
+        arguments += request.exportProfile.videoArguments(quality: quality)
 
         if request.hasAudioStream {
-            arguments += ["-c:a", "aac", "-b:a", "128k"]
+            arguments += request.exportProfile.audioArguments()
         } else {
             arguments += ["-an"]
         }
 
         arguments += [
-            "-metadata:s:v:0", "rotate=0",
-            "-movflags", "+faststart",
-            "-progress", "pipe:1",
-            "-nostats",
-            request.outputURL.path
+            "-metadata:s:v:0", "rotate=0"
         ]
+        arguments += request.exportProfile.containerArguments
+        arguments += ["-progress", "pipe:1", "-nostats", request.outputURL.path]
 
         return arguments
     }
 
     func transformCommand(ffmpegPath: String, request: VideoTransformRequest) throws -> EditingCommand {
         EditingCommand(executablePath: ffmpegPath, arguments: try transformArguments(for: request))
+    }
+
+    func cropArguments(for request: CropRequest) throws -> [String] {
+        try request.validate()
+        let filterChain = try request.filterChain()
+        guard !filterChain.contains("\""), !filterChain.contains("'") else {
+            throw VideoTransformValidationError.invalidFilterChain
+        }
+
+        var arguments = [
+            "-y",
+            "-nostdin",
+            "-i", request.inputURL.path,
+            "-map", "0:v:0"
+        ]
+
+        if request.hasAudioStream {
+            arguments += ["-map", "0:a:0?"]
+        }
+
+        let quality = try CompressionQualitySettings(crf: 20, preset: .medium)
+        arguments += ["-vf", filterChain]
+        arguments += request.exportProfile.videoArguments(quality: quality)
+
+        if request.hasAudioStream {
+            arguments += request.exportProfile.audioArguments()
+        } else {
+            arguments += ["-an"]
+        }
+
+        arguments += [
+            "-metadata:s:v:0", "rotate=0"
+        ]
+        arguments += request.exportProfile.containerArguments
+        arguments += ["-progress", "pipe:1", "-nostats", request.outputURL.path]
+
+        return arguments
+    }
+
+    func cropCommand(ffmpegPath: String, request: CropRequest) throws -> EditingCommand {
+        EditingCommand(executablePath: ffmpegPath, arguments: try cropArguments(for: request))
     }
 
     func editPlanArguments(for plan: VideoEditPlan) throws -> [String] {
@@ -209,18 +227,14 @@ public extension VideoEditingService {
                 }
                 arguments += ["-af", audioFilter]
             }
-            arguments += [
-                "-c:v", "libx264",
-                "-preset", quality.preset.rawValue,
-                "-crf", String(quality.crf),
-                "-pix_fmt", "yuv420p"
-            ]
+            arguments += plan.exportProfile.videoArguments(quality: quality)
             if plan.audioMode == .keep, plan.hasAudioStream {
-                arguments += ["-c:a", "aac", "-b:a", "128k"]
+                arguments += plan.exportProfile.audioArguments()
             } else {
                 arguments += ["-an"]
             }
-            arguments += ["-metadata:s:v:0", "rotate=0", "-movflags", "+faststart"]
+            arguments += ["-metadata:s:v:0", "rotate=0"]
+            arguments += plan.exportProfile.containerArguments
         }
 
         arguments += [
@@ -260,26 +274,20 @@ public extension VideoEditingService {
             arguments += ["-vf", videoFilter]
         }
 
-        arguments += [
-            "-c:v", "libx264",
-            "-preset", "medium",
-            "-crf", "20",
-            "-pix_fmt", "yuv420p"
-        ]
+        let quality = try CompressionQualitySettings(crf: 20, preset: .medium)
+        arguments += request.exportProfile.videoArguments(quality: quality)
 
         if request.keepsAudio {
-            arguments += ["-c:a", "aac", "-b:a", "128k"]
+            arguments += request.exportProfile.audioArguments()
         } else {
             arguments += ["-an"]
         }
 
         arguments += [
-            "-metadata:s:v:0", "rotate=0",
-            "-movflags", "+faststart",
-            "-progress", "pipe:1",
-            "-nostats",
-            request.outputURL.path
+            "-metadata:s:v:0", "rotate=0"
         ]
+        arguments += request.exportProfile.containerArguments
+        arguments += ["-progress", "pipe:1", "-nostats", request.outputURL.path]
         return arguments
     }
 

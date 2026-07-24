@@ -127,6 +127,7 @@ public struct CompressionRequest: Equatable, Sendable {
     public let resolution: OutputResolution
     public let customHeight: Int?
     public let audioMode: CompressionAudioMode
+    public let exportProfile: ExportProfile
 
     public init(
         inputURL: URL,
@@ -140,7 +141,8 @@ public struct CompressionRequest: Equatable, Sendable {
         encoderPreset: EncoderPreset,
         resolution: OutputResolution,
         customHeight: Int?,
-        audioMode: CompressionAudioMode
+        audioMode: CompressionAudioMode,
+        exportProfile: ExportProfile = .mp4H264
     ) {
         self.inputURL = inputURL
         self.outputURL = outputURL
@@ -154,6 +156,7 @@ public struct CompressionRequest: Equatable, Sendable {
         self.resolution = resolution
         self.customHeight = customHeight
         self.audioMode = audioMode
+        self.exportProfile = exportProfile
     }
 
     public func qualitySettings() throws -> CompressionQualitySettings {

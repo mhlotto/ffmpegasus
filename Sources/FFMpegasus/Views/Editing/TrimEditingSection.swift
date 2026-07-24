@@ -6,6 +6,8 @@ struct TrimEditingSection: View {
     let inputURL: URL?
     let duration: TimeInterval
     let metadata: VideoMetadata?
+    let exportProfileCapabilities: ExportProfileCapabilities?
+    let exportProfileCapabilityMessage: String?
     @ObservedObject var operationState: EditingOperationState
     @Binding var validationMessage: String?
     let onStart: (EditingRequest) -> Void
@@ -15,6 +17,7 @@ struct TrimEditingSection: View {
     @State private var startSeconds = "0"
     @State private var endSeconds = "0"
     @AppStorage("trimExecutionMode") private var trimExecutionModeRaw = TrimExecutionMode.fast.rawValue
+    @AppStorage("exportProfile") private var exportProfileRaw = ExportProfile.mp4H264.rawValue
     @FocusState private var focusedField: TrimField?
 
     private enum TrimField {
@@ -29,6 +32,11 @@ struct TrimEditingSection: View {
     private var trimExecutionMode: TrimExecutionMode {
         get { TrimExecutionMode(rawValue: trimExecutionModeRaw) ?? .fast }
         nonmutating set { trimExecutionModeRaw = newValue.rawValue }
+    }
+
+    private var exportProfile: ExportProfile {
+        get { ExportProfile(rawValue: exportProfileRaw) ?? .mp4H264 }
+        nonmutating set { exportProfileRaw = newValue.rawValue }
     }
 
     var body: some View {
@@ -58,6 +66,19 @@ struct TrimEditingSection: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
+            ExportProfileSelector(
+                selectedProfile: Binding(get: { exportProfile }, set: { exportProfile = $0 }),
+                capabilities: exportProfileCapabilities,
+                capabilityMessage: exportProfileCapabilityMessage,
+                disabled: controlsDisabled
+            )
+
+            if trimExecutionMode == .fast, exportProfile.forcesReencode {
+                Text("Fast Trim will be re-encoded because \(exportProfile.displayName) was selected.")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+            }
+
             HStack {
                 TextField("First seconds", text: $startSeconds)
                     .textFieldStyle(.roundedBorder)
@@ -74,7 +95,7 @@ struct TrimEditingSection: View {
                 } label: {
                     Label(operationState.isRunning ? "Trimming..." : "Trim", systemImage: "scissors")
                 }
-                .disabled(controlsDisabled)
+                .disabled(controlsDisabled || selectedProfileUnsupported)
 
                 Button {
                     onCancel()
@@ -117,9 +138,9 @@ struct TrimEditingSection: View {
         }
 
         let panel = NSSavePanel()
-        let outputExtension = trimExecutionMode == .accurate ? "mp4" : inputURL.pathExtension
+        let outputExtension = trimExecutionMode == .fast && !exportProfile.forcesReencode ? inputURL.pathExtension : exportProfile.fileExtension
         panel.allowedContentTypes = [UTType(filenameExtension: outputExtension) ?? .movie]
-        panel.nameFieldStringValue = OutputFilename.trimmedName(for: inputURL, mode: trimExecutionMode)
+        panel.nameFieldStringValue = OutputFilename.trimmedName(for: inputURL, mode: trimExecutionMode, profile: exportProfile)
 
         guard panel.runModal() == .OK, let outputURL = panel.url else { return }
 
@@ -133,7 +154,8 @@ struct TrimEditingSection: View {
             method: .streamCopy,
             trimExecutionMode: trimExecutionMode,
             hasVideoStream: metadata?.videoCodec != nil,
-            hasAudioStream: metadata?.audioCodec != nil
+            hasAudioStream: metadata?.audioCodec != nil,
+            exportProfile: exportProfile
         )
 
         do {
@@ -143,5 +165,9 @@ struct TrimEditingSection: View {
         } catch {
             validationMessage = error.localizedDescription
         }
+    }
+
+    private var selectedProfileUnsupported: Bool {
+        exportProfileCapabilities?.support(for: exportProfile).isSupported == false
     }
 }

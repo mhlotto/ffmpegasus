@@ -103,10 +103,12 @@ public struct VideoEditPlan: Equatable, Sendable {
     public let hasAudioStream: Bool
     public let trim: TrimConfiguration?
     public let transform: VideoTransformConfiguration?
+    public let crop: CropConfiguration?
     public let resize: ResizeConfiguration?
     public let compression: CompressionConfiguration?
     public let speed: VideoSpeed?
     public let audioMode: ExportAudioMode
+    public let exportProfile: ExportProfile
 
     public init(
         inputURL: URL,
@@ -118,10 +120,12 @@ public struct VideoEditPlan: Equatable, Sendable {
         hasAudioStream: Bool,
         trim: TrimConfiguration?,
         transform: VideoTransformConfiguration?,
+        crop: CropConfiguration? = nil,
         resize: ResizeConfiguration?,
         compression: CompressionConfiguration?,
         speed: VideoSpeed? = nil,
-        audioMode: ExportAudioMode
+        audioMode: ExportAudioMode,
+        exportProfile: ExportProfile = .mp4H264
     ) {
         self.inputURL = inputURL
         self.outputURL = outputURL
@@ -132,15 +136,18 @@ public struct VideoEditPlan: Equatable, Sendable {
         self.hasAudioStream = hasAudioStream
         self.trim = trim
         self.transform = transform
+        self.crop = crop
         self.resize = resize
         self.compression = compression
         self.speed = speed
         self.audioMode = audioMode
+        self.exportProfile = exportProfile
     }
 
     public var hasSelectedChanges: Bool {
         trim != nil ||
             (transform?.hasTransformation == true) ||
+            crop != nil ||
             resize != nil ||
             compression != nil ||
             speed != nil ||
@@ -160,8 +167,10 @@ public struct VideoEditPlan: Equatable, Sendable {
 
     public func executionStrategy() throws -> ExportExecutionStrategy {
         try validate()
+        if exportProfile.forcesReencode { return .reencode }
         if trim?.executionMode == .accurate { return .reencode }
         if transform?.hasTransformation == true { return .reencode }
+        if crop != nil { return .reencode }
         if resize != nil { return .reencode }
         if compression != nil { return .reencode }
         if speed != nil { return .reencode }
@@ -201,23 +210,32 @@ public struct VideoEditPlan: Equatable, Sendable {
         return VideoDimensions(width: normalized.height, height: normalized.width)
     }
 
-    public func outputDimensions() throws -> VideoDimensions {
+    public func dimensionsAfterCrop() throws -> VideoDimensions {
         let transformed = try dimensionsAfterTransform()
-        guard let resize else { return transformed }
+        guard let crop else { return transformed }
+        return try crop.resolvedRectangle(sourceDimensions: transformed).dimensions
+    }
+
+    public func outputDimensions() throws -> VideoDimensions {
+        let cropped = try dimensionsAfterCrop()
+        guard let resize else { return cropped }
         guard let requestedMaxHeight = try resize.resolution.maxHeight(customHeight: resize.customHeight) else {
-            return transformed
+            return cropped
         }
-        if resize.resolution == .custom, requestedMaxHeight > transformed.height {
+        if resize.resolution == .custom, requestedMaxHeight > cropped.height {
             throw CompressionValidationError.customHeightExceedsSource
         }
-        guard requestedMaxHeight < transformed.height else { return transformed }
-        let outputHeight = min(requestedMaxHeight, transformed.height).makeEvenDownForTransform()
-        let scaledWidth = Double(transformed.width) * Double(outputHeight) / Double(transformed.height)
+        guard requestedMaxHeight < cropped.height else { return cropped }
+        let outputHeight = min(requestedMaxHeight, cropped.height).makeEvenDownForTransform()
+        let scaledWidth = Double(cropped.width) * Double(outputHeight) / Double(cropped.height)
         return VideoDimensions(width: Int(scaledWidth.rounded()).makeEvenNearestForScale(), height: outputHeight)
     }
 
     public func filterChain() throws -> String? {
         var filters = transform?.filterComponents ?? []
+        if let crop {
+            filters.append(try crop.resolvedRectangle(sourceDimensions: dimensionsAfterTransform()).filter)
+        }
         if let scaleFilter = try scaleFilter() {
             filters.append(scaleFilter)
         }
@@ -231,7 +249,7 @@ public struct VideoEditPlan: Equatable, Sendable {
     public func scaleFilter() throws -> String? {
         guard let resize,
               let requestedMaxHeight = try resize.resolution.maxHeight(customHeight: resize.customHeight),
-              requestedMaxHeight < (try dimensionsAfterTransform()).height else {
+              requestedMaxHeight < (try dimensionsAfterCrop()).height else {
             return nil
         }
         return "scale=-2:min(\(requestedMaxHeight)\\,ih)"
@@ -246,6 +264,9 @@ public struct VideoEditPlan: Equatable, Sendable {
         }
         _ = try trimPlan()
         _ = try outputDimensions()
+        if let crop {
+            _ = try crop.resolvedRectangle(sourceDimensions: dimensionsAfterTransform())
+        }
         if let compression {
             _ = try compression.settings()
         }
@@ -283,8 +304,8 @@ public enum VideoEditPlanValidationError: LocalizedError, Equatable, Sendable {
 }
 
 extension OutputFilename {
-    public static func editedName(for inputURL: URL) -> String {
+    public static func editedName(for inputURL: URL, profile: ExportProfile = .mp4H264) -> String {
         let base = inputURL.deletingPathExtension().lastPathComponent
-        return "\(base)-edited.mp4"
+        return "\(base)-edited.\(profile.fileExtension)"
     }
 }

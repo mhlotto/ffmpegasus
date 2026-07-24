@@ -49,13 +49,17 @@ final class FFMpegasusGUITests: XCTestCase {
         let resultURL = directory.appendingPathComponent("result.json")
         let frameOutputURL = directory.appendingPathComponent("frame-smoke.png")
         let gifOutputURL = directory.appendingPathComponent("gif-smoke.gif")
+        let cropOutputURL = directory.appendingPathComponent("crop-smoke.mp4")
+        let profileOutputDirectoryURL = directory.appendingPathComponent("profile-smoke", isDirectory: true)
 
         let result = try launchAppAndReadResult(
             resultURL: resultURL,
             extraEnvironment: [
                 "FFMPEGASUS_UI_TEST_FIXTURE": fixtureURL.path,
                 "FFMPEGASUS_UI_TEST_FRAME_OUTPUT": frameOutputURL.path,
-                "FFMPEGASUS_UI_TEST_GIF_OUTPUT": gifOutputURL.path
+                "FFMPEGASUS_UI_TEST_GIF_OUTPUT": gifOutputURL.path,
+                "FFMPEGASUS_UI_TEST_CROP_OUTPUT": cropOutputURL.path,
+                "FFMPEGASUS_UI_TEST_PROFILE_OUTPUT_DIRECTORY": profileOutputDirectoryURL.path
             ]
         )
 
@@ -74,6 +78,7 @@ final class FFMpegasusGUITests: XCTestCase {
             "Remove Audio",
             "Combined Export",
             "Rotate / Flip",
+            "Crop Video",
             "Compress / Resize",
             "Change Speed",
             "Export Current Frame",
@@ -92,6 +97,22 @@ final class FFMpegasusGUITests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: gifOutputURL.path))
         let gifSize = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: gifOutputURL.path)[.size] as? NSNumber)
         XCTAssertGreaterThan(gifSize.uint64Value, 0)
+
+        XCTAssertEqual(result["cropExportCompleted"] as? Bool, true, result["cropExportError"] as? String ?? "")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: cropOutputURL.path))
+        let cropSize = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: cropOutputURL.path)[.size] as? NSNumber)
+        XCTAssertGreaterThan(cropSize.uint64Value, 0)
+
+        if result["nonH264ExportSkipped"] as? Bool == true {
+            XCTAssertNotNil(result["nonH264ExportError"] as? String)
+        } else {
+            XCTAssertEqual(result["nonH264ExportCompleted"] as? Bool, true, result["nonH264ExportError"] as? String ?? "")
+            let outputPath = try XCTUnwrap(result["nonH264ExportOutput"] as? String)
+            XCTAssertTrue(FileManager.default.fileExists(atPath: outputPath))
+            let profileSize = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: outputPath)[.size] as? NSNumber)
+            XCTAssertGreaterThan(profileSize.uint64Value, 0)
+            XCTAssertTrue(["mp4", "webm", "mov"].contains(URL(fileURLWithPath: outputPath).pathExtension))
+        }
     }
 
     private func requireEnabled() throws {
@@ -103,7 +124,7 @@ final class FFMpegasusGUITests: XCTestCase {
     private func launchAppAndReadResult(
         resultURL: URL,
         extraEnvironment: [String: String],
-        timeout: TimeInterval = 25
+        timeout: TimeInterval = 130
     ) throws -> [String: Any] {
         let appURL = try builtAppExecutable()
         let stdout = Pipe()

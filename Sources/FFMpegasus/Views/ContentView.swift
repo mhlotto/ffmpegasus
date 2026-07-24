@@ -12,6 +12,8 @@ final class AppViewModel: ObservableObject {
     @Published var player: AVPlayer?
     @Published var metadata: VideoMetadata?
     @Published var metadataMessage: String?
+    @Published var exportProfileCapabilities: ExportProfileCapabilities?
+    @Published var exportProfileCapabilityMessage: String?
     @Published private(set) var timeline = PlaybackTimelineState()
 
     private var timeObserver: Any?
@@ -77,6 +79,16 @@ final class AppViewModel: ObservableObject {
                 let assetDuration = try? await AVURLAsset(url: url).load(.duration).seconds
                 timeline.setDuration(assetDuration ?? 0)
             }
+        }
+    }
+
+    func refreshExportProfileCapabilities() async {
+        do {
+            exportProfileCapabilities = try await FFmpegCompressionEncoderChecker().capabilities(ffmpegPath: ffmpegPath)
+            exportProfileCapabilityMessage = nil
+        } catch {
+            exportProfileCapabilities = nil
+            exportProfileCapabilityMessage = error.localizedDescription
         }
     }
 
@@ -368,6 +380,12 @@ final class EditingOperationController: ObservableObject {
         }
     }
 
+    func crop(ffmpegPath: String, ffprobePath: String, request: CropRequest, state: EditingOperationState) {
+        Task {
+            await editingService.runCrop(ffmpegPath: ffmpegPath, ffprobePath: ffprobePath, request: request, state: state)
+        }
+    }
+
     func exportPlan(ffmpegPath: String, ffprobePath: String, plan: VideoEditPlan, state: EditingOperationState) {
         Task {
             await editingService.runEditPlan(ffmpegPath: ffmpegPath, ffprobePath: ffprobePath, plan: plan, state: state)
@@ -450,11 +468,14 @@ struct ContentView: View {
                         inputURL: model.videoURL,
                         duration: model.duration,
                         metadata: model.metadata,
+                        exportProfileCapabilities: model.exportProfileCapabilities,
+                        exportProfileCapabilityMessage: model.exportProfileCapabilityMessage,
                         operationState: operationState,
                         onStart: startEditing,
                         onRemoveAudio: startRemoveAudio,
                         onCompress: startCompression,
                         onTransform: startTransform,
+                        onCrop: startCrop,
                         onExportPlan: startEditPlanExport,
                         onChangeSpeed: startSpeedChange,
                         onExportFrame: startFrameExport,
@@ -464,6 +485,7 @@ struct ContentView: View {
                         canExportCurrentFrame: !model.isSeekingOrScrubbing,
                         testAutomationFrameOutputURL: testAutomation.nativeXCUIMode ? testAutomation.frameOutputURL : nil,
                         testAutomationGIFOutputURL: testAutomation.nativeXCUIMode ? testAutomation.gifOutputURL : nil,
+                        testAutomationCropOutputURL: testAutomation.nativeXCUIMode ? testAutomation.cropOutputURL : nil,
                         onCancel: { editingController.cancel(state: operationState) }
                     )
                 }
@@ -474,6 +496,9 @@ struct ContentView: View {
         .task {
             await runXCUITestLaunchConfigurationIfNeeded()
             await runUITestAutomationIfNeeded()
+        }
+        .task(id: model.ffmpegPath) {
+            await model.refreshExportProfileCapabilities()
         }
     }
 
@@ -550,6 +575,10 @@ struct ContentView: View {
         editingController.transform(ffmpegPath: model.ffmpegPath, ffprobePath: model.ffprobePath, request: request, state: operationState)
     }
 
+    private func startCrop(_ request: CropRequest) {
+        editingController.crop(ffmpegPath: model.ffmpegPath, ffprobePath: model.ffprobePath, request: request, state: operationState)
+    }
+
     private func startEditPlanExport(_ plan: VideoEditPlan) {
         editingController.exportPlan(ffmpegPath: model.ffmpegPath, ffprobePath: model.ffprobePath, plan: plan, state: operationState)
     }
@@ -597,6 +626,7 @@ struct ContentView: View {
                 "Remove Audio",
                 "Combined Export",
                 "Rotate / Flip",
+                "Crop Video",
                 "Compress / Resize",
                 "Change Speed",
                 "Export Current Frame",
@@ -622,12 +652,13 @@ struct ContentView: View {
         model.loadVideo(fixtureURL)
         result["fixturePath"] = fixtureURL.path
 
-        let metadataLoaded = await waitUntil(timeout: 8) {
+        let metadataLoaded = await waitUntil(timeout: 15) {
             model.metadata != nil && model.duration > 0
         }
         result["fixtureLoaded"] = metadataLoaded
         result["loadedFile"] = model.fileName
         result["metadataVisible"] = model.metadata != nil
+        result["metadataMessage"] = model.metadataMessage ?? ""
         result["duration"] = model.duration
         result["playbackControlsEnabled"] = model.videoURL != nil
 
@@ -667,6 +698,14 @@ struct ContentView: View {
 
         if let gifOutputURL = testAutomation.gifOutputURL {
             await runGIFExportSmoke(outputURL: gifOutputURL, result: &result)
+        }
+
+        if let cropOutputURL = testAutomation.cropOutputURL {
+            await runCropExportSmoke(outputURL: cropOutputURL, result: &result)
+        }
+
+        if let profileOutputDirectoryURL = testAutomation.profileOutputDirectoryURL {
+            await runNonH264ExportProfileSmoke(outputDirectoryURL: profileOutputDirectoryURL, result: &result)
         }
     }
 
@@ -754,6 +793,126 @@ struct ContentView: View {
         } catch {
             result["gifExportCompleted"] = false
             result["gifExportError"] = error.localizedDescription
+        }
+    }
+
+    private func runCropExportSmoke(outputURL: URL, result: inout [String: Any]) async {
+        guard let inputURL = model.videoURL,
+              let width = model.metadata?.width,
+              let height = model.metadata?.height else {
+            result["cropExportCompleted"] = false
+            result["cropExportError"] = "Missing loaded input or metadata."
+            return
+        }
+
+        let configuration = CropConfiguration(
+            mode: .aspectRatio,
+            aspectRatioPreset: .square,
+            customAspectRatio: nil,
+            position: .center,
+            customX: nil,
+            customY: nil,
+            customWidth: nil,
+            customHeight: nil
+        )
+        let request = CropRequest(
+            inputURL: inputURL,
+            outputURL: outputURL,
+            sourceDuration: model.duration,
+            sourceDimensions: VideoDimensions(width: width, height: height),
+            sourceRotationDegrees: model.metadata?.rotationDegrees,
+            hasVideoStream: model.metadata?.videoCodec != nil,
+            hasAudioStream: model.metadata?.audioCodec != nil,
+            configuration: configuration
+        )
+
+        editingController.crop(ffmpegPath: model.ffmpegPath, ffprobePath: model.ffprobePath, request: request, state: operationState)
+        let completed = await waitUntil(timeout: 15) {
+            if case .completed(let completedURL, _) = operationState.phase {
+                let size = (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? NSNumber)?.uint64Value ?? 0
+                return completedURL == outputURL && size > 0
+            }
+            return false
+        }
+        result["cropExportCompleted"] = completed
+        result["cropExportOutput"] = outputURL.path
+        result["cropOperationStatus"] = operationState.status
+        result["cropOperationMessage"] = operationState.message ?? ""
+        result["cropExportOutputExists"] = FileManager.default.fileExists(atPath: outputURL.path)
+        result["cropExportOutputSize"] = (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? NSNumber)?.uint64Value ?? 0
+    }
+
+    private func runNonH264ExportProfileSmoke(outputDirectoryURL: URL, result: inout [String: Any]) async {
+        guard let inputURL = model.videoURL,
+              let width = model.metadata?.width,
+              let height = model.metadata?.height else {
+            result["nonH264ExportCompleted"] = false
+            result["nonH264ExportError"] = "Missing loaded input or metadata."
+            return
+        }
+
+        let capabilities: ExportProfileCapabilities
+        do {
+            capabilities = try await FFmpegCompressionEncoderChecker().capabilities(ffmpegPath: model.ffmpegPath)
+        } catch {
+            result["nonH264ExportCompleted"] = false
+            result["nonH264ExportSkipped"] = true
+            result["nonH264ExportError"] = error.localizedDescription
+            return
+        }
+
+        guard let profile = [ExportProfile.mp4HEVC, .webmVP9, .movProRes422].first(where: { capabilities.support(for: $0).isSupported }) else {
+            result["nonH264ExportCompleted"] = false
+            result["nonH264ExportSkipped"] = true
+            result["nonH264ExportError"] = "No supported non-H.264 export profile is available."
+            return
+        }
+
+        do {
+            try FileManager.default.createDirectory(at: outputDirectoryURL, withIntermediateDirectories: true)
+            let outputURL = outputDirectoryURL.appendingPathComponent("profile-smoke.\(profile.fileExtension)")
+            let request = CropRequest(
+                inputURL: inputURL,
+                outputURL: outputURL,
+                sourceDuration: model.duration,
+                sourceDimensions: VideoDimensions(width: width, height: height),
+                sourceRotationDegrees: model.metadata?.rotationDegrees,
+                hasVideoStream: model.metadata?.videoCodec != nil,
+                hasAudioStream: model.metadata?.audioCodec != nil,
+                configuration: CropConfiguration(
+                    mode: .aspectRatio,
+                    aspectRatioPreset: .square,
+                    customAspectRatio: nil,
+                    position: .center,
+                    customX: nil,
+                    customY: nil,
+                    customWidth: nil,
+                    customHeight: nil
+                ),
+                exportProfile: profile
+            )
+
+            editingController.crop(ffmpegPath: model.ffmpegPath, ffprobePath: model.ffprobePath, request: request, state: operationState)
+            let completed = await waitUntil(timeout: 60) {
+                if case .completed(let completedURL, _) = operationState.phase {
+                    let size = (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? NSNumber)?.uint64Value ?? 0
+                    return completedURL == outputURL && size > 0
+                }
+                return false
+            }
+            result["nonH264ExportCompleted"] = completed
+            result["nonH264ExportProfile"] = profile.displayName
+            result["nonH264ExportOutput"] = outputURL.path
+            result["nonH264OperationStatus"] = operationState.status
+            result["nonH264OperationMessage"] = operationState.message ?? ""
+            if !completed {
+                result["nonH264ExportError"] = operationState.message ?? operationState.status
+            }
+            result["nonH264ExportOutputExists"] = FileManager.default.fileExists(atPath: outputURL.path)
+            result["nonH264ExportOutputSize"] = (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? NSNumber)?.uint64Value ?? 0
+        } catch {
+            result["nonH264ExportCompleted"] = false
+            result["nonH264ExportError"] = error.localizedDescription
         }
     }
 

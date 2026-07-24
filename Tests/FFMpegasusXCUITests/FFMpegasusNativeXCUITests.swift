@@ -167,7 +167,35 @@ final class FFMpegasusNativeXCUITests: XCTestCase {
         })
     }
 
-    private func launchApp(fixtureURL: URL? = nil, frameOutputURL: URL? = nil) -> XCUIApplication {
+    func testCropExportThroughVisibleControls() throws {
+        let outputDirectory = try temporaryDirectory(named: "xcui-crop-export")
+        let outputURL = outputDirectory.appendingPathComponent("crop-xcui.mp4")
+        app = launchApp(fixtureURL: try standardFixtureURL(), cropOutputURL: outputURL)
+        XCTAssertTrue(waitUntil(timeout: 10) { self.app.sliders["playback.timeline"].isEnabled })
+
+        let cropSection = element("editing.crop")
+        XCTAssertTrue(scrollToElement(cropSection))
+        XCTAssertTrue(cropSection.exists)
+
+        let exportButton = app.buttons["crop.exportButton"]
+        XCTAssertTrue(scrollToElement(exportButton))
+        XCTAssertTrue(waitUntil(timeout: 10) { exportButton.isEnabled })
+        exportButton.click()
+
+        XCTAssertTrue(waitUntil(timeout: 18) {
+            FileManager.default.fileExists(atPath: outputURL.path)
+        })
+        let attributes = try FileManager.default.attributesOfItem(atPath: outputURL.path)
+        let size = try XCTUnwrap(attributes[.size] as? NSNumber)
+        XCTAssertGreaterThan(size.uint64Value, 0)
+
+        let operationStatus = element("operation.status")
+        XCTAssertTrue(waitUntil(timeout: 10) {
+            operationStatus.exists && self.accessibleText(operationStatus).contains("Crop export complete")
+        })
+    }
+
+    private func launchApp(fixtureURL: URL? = nil, frameOutputURL: URL? = nil, cropOutputURL: URL? = nil) -> XCUIApplication {
         let application = XCUIApplication()
         application.launchEnvironment["FFMPEGASUS_XCUITEST_MODE"] = "1"
         application.launchEnvironment["FFMPEGASUS_XCUITEST_RESET_DEFAULTS"] = "1"
@@ -176,6 +204,9 @@ final class FFMpegasusNativeXCUITests: XCTestCase {
         }
         if let frameOutputURL {
             application.launchEnvironment["FFMPEGASUS_XCUITEST_FRAME_OUTPUT"] = frameOutputURL.path
+        }
+        if let cropOutputURL {
+            application.launchEnvironment["FFMPEGASUS_XCUITEST_CROP_OUTPUT"] = cropOutputURL.path
         }
         application.launch()
         return application
@@ -187,6 +218,7 @@ final class FFMpegasusNativeXCUITests: XCTestCase {
             "editing.removeAudio",
             "editing.combinedExport",
             "editing.transform",
+            "editing.crop",
             "editing.compression",
             "editing.speed",
             "editing.frameExport",

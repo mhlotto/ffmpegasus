@@ -27,6 +27,7 @@ public struct EditingRequest: Equatable, Sendable {
     public let trimExecutionMode: TrimExecutionMode
     public let hasVideoStream: Bool
     public let hasAudioStream: Bool
+    public let exportProfile: ExportProfile
 
     public init(
         inputURL: URL,
@@ -38,7 +39,8 @@ public struct EditingRequest: Equatable, Sendable {
         method: EditingMethod,
         trimExecutionMode: TrimExecutionMode = .fast,
         hasVideoStream: Bool = true,
-        hasAudioStream: Bool = true
+        hasAudioStream: Bool = true,
+        exportProfile: ExportProfile = .mp4H264
     ) {
         self.inputURL = inputURL
         self.outputURL = outputURL
@@ -50,6 +52,7 @@ public struct EditingRequest: Equatable, Sendable {
         self.trimExecutionMode = trimExecutionMode
         self.hasVideoStream = hasVideoStream
         self.hasAudioStream = hasAudioStream
+        self.exportProfile = exportProfile
     }
 
     public func trimPlan() throws -> TrimPlan {
@@ -58,6 +61,10 @@ public struct EditingRequest: Equatable, Sendable {
             removeStartSeconds: removeStartSeconds,
             removeEndSeconds: removeEndSeconds
         )
+    }
+
+    public var effectiveTrimExecutionMode: TrimExecutionMode {
+        exportProfile == .mp4H264 ? trimExecutionMode : .accurate
     }
 }
 
@@ -149,19 +156,17 @@ public enum OutputFilename {
         return "\(base)-muted.\(ext)"
     }
 
-    public static func compressedName(for inputURL: URL) -> String {
+    public static func compressedName(for inputURL: URL, profile: ExportProfile = .mp4H264) -> String {
         let base = inputURL.deletingPathExtension().lastPathComponent
-        return "\(base)-compressed.mp4"
+        return "\(base)-compressed.\(profile.fileExtension)"
     }
 
-    public static func trimmedName(for inputURL: URL, mode: TrimExecutionMode) -> String {
+    public static func trimmedName(for inputURL: URL, mode: TrimExecutionMode, profile: ExportProfile = .mp4H264) -> String {
         let base = inputURL.deletingPathExtension().lastPathComponent
-        switch mode {
-        case .fast:
+        if mode == .fast, profile == .mp4H264 {
             let ext = inputURL.pathExtension.isEmpty ? "mp4" : inputURL.pathExtension
             return "\(base)-trimmed.\(ext)"
-        case .accurate:
-            return "\(base)-trimmed-accurate.mp4"
         }
+        return "\(base)-trimmed-accurate.\(profile.fileExtension)"
     }
 }

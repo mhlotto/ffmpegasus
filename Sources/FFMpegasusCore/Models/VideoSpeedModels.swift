@@ -136,6 +136,7 @@ public struct VideoSpeedRequest: Equatable, Sendable {
     public let hasAudioStream: Bool
     public let speed: VideoSpeed
     public let audioMode: SpeedAudioMode
+    public let exportProfile: ExportProfile
 
     public init(
         inputURL: URL,
@@ -146,7 +147,8 @@ public struct VideoSpeedRequest: Equatable, Sendable {
         hasVideoStream: Bool,
         hasAudioStream: Bool,
         speed: VideoSpeed,
-        audioMode: SpeedAudioMode
+        audioMode: SpeedAudioMode,
+        exportProfile: ExportProfile = .mp4H264
     ) {
         self.inputURL = inputURL
         self.outputURL = outputURL
@@ -157,6 +159,7 @@ public struct VideoSpeedRequest: Equatable, Sendable {
         self.hasAudioStream = hasAudioStream
         self.speed = speed
         self.audioMode = audioMode
+        self.exportProfile = exportProfile
     }
 
     public var keepsAudio: Bool {
@@ -247,8 +250,8 @@ public enum VideoSpeedValidationError: LocalizedError, Equatable, Sendable {
 }
 
 extension OutputFilename {
-    public static func speedName(for inputURL: URL, speed: VideoSpeed) -> String {
+    public static func speedName(for inputURL: URL, speed: VideoSpeed, profile: ExportProfile = .mp4H264) -> String {
         let base = inputURL.deletingPathExtension().lastPathComponent
-        return "\(base)-speed-\(speed.filenameLabel).mp4"
+        return "\(base)-speed-\(speed.filenameLabel).\(profile.fileExtension)"
     }
 }

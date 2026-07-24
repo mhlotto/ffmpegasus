@@ -42,6 +42,7 @@ public struct VideoTransformRequest: Equatable, Sendable {
     public let rotation: VideoRotation
     public let flipHorizontal: Bool
     public let flipVertical: Bool
+    public let exportProfile: ExportProfile
 
     public init(
         inputURL: URL,
@@ -53,7 +54,8 @@ public struct VideoTransformRequest: Equatable, Sendable {
         hasAudioStream: Bool,
         rotation: VideoRotation,
         flipHorizontal: Bool,
-        flipVertical: Bool
+        flipVertical: Bool,
+        exportProfile: ExportProfile = .mp4H264
     ) {
         self.inputURL = inputURL
         self.outputURL = outputURL
@@ -65,6 +67,7 @@ public struct VideoTransformRequest: Equatable, Sendable {
         self.rotation = rotation
         self.flipHorizontal = flipHorizontal
         self.flipVertical = flipVertical
+        self.exportProfile = exportProfile
     }
 
     public var hasTransformation: Bool {
@@ -152,15 +155,17 @@ public enum VideoTransformValidationError: LocalizedError, Equatable, Sendable {
 }
 
 extension OutputFilename {
-    public static func transformedName(for inputURL: URL, rotation: VideoRotation, flipHorizontal: Bool, flipVertical: Bool) -> String {
+    public static func transformedName(for inputURL: URL, rotation: VideoRotation, flipHorizontal: Bool, flipVertical: Bool, profile: ExportProfile = .mp4H264) -> String {
         let base = inputURL.deletingPathExtension().lastPathComponent
+        let suffix: String
         if rotation != .none, flipHorizontal || flipVertical {
-            return "\(base)-transformed.mp4"
+            suffix = "transformed"
+        } else if rotation != .none {
+            suffix = "rotated"
+        } else {
+            suffix = "flipped"
         }
-        if rotation != .none {
-            return "\(base)-rotated.mp4"
-        }
-        return "\(base)-flipped.mp4"
+        return "\(base)-\(suffix).\(profile.fileExtension)"
     }
 }
 

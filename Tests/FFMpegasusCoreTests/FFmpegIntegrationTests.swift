@@ -239,6 +239,55 @@ final class FFmpegIntegrationTests: XCTestCase {
         XCTAssertNil(removeMetadata.audioCodec)
     }
 
+    func testOptionalFFmpegSyntheticExportProfiles() async throws {
+        let tools = try MediaFixtures.requireTools()
+        try await MediaFixtures.ensureGenerated()
+        let capabilities = try await FFmpegCompressionEncoderChecker().capabilities(ffmpegPath: tools.ffmpeg)
+        let supportedProfiles = ExportProfile.allCases.filter { capabilities.support(for: $0).isSupported }
+        let nonDefaultProfiles = supportedProfiles.filter { $0 != .mp4H264 }
+        guard !nonDefaultProfiles.isEmpty else {
+            throw XCTSkip("No non-H.264 export-profile encoders are available in this FFmpeg build")
+        }
+
+        let standard = try MediaFixtures.fixture(id: "standardLandscape")
+        let input = MediaFixtures.url(for: standard)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let service = VideoEditingService()
+
+        for profile in nonDefaultProfiles {
+            let output = directory.appendingPathComponent("profile-\(profile.rawValue).\(profile.fileExtension)")
+            let request = CompressionRequest(
+                inputURL: input,
+                outputURL: output,
+                sourceDuration: standard.durationSeconds,
+                sourceDimensions: VideoDimensions(width: standard.codedWidth, height: standard.codedHeight),
+                hasVideoStream: true,
+                hasAudioStream: true,
+                quality: .balanced,
+                customCRF: 24,
+                encoderPreset: .medium,
+                resolution: .original,
+                customHeight: nil,
+                audioMode: .keep,
+                exportProfile: profile
+            )
+            let command = try service.compressionCommand(ffmpegPath: tools.ffmpeg, request: request)
+            XCTAssertTrue(command.arguments.contains(profile.requiredVideoEncoder), "Missing video encoder for \(profile.displayName)")
+            if profile == .webmVP9 {
+                XCTAssertFalse(command.arguments.contains("+faststart"))
+            }
+
+            let result = try await ProcessRunner().run(executablePath: command.executablePath, arguments: command.arguments)
+            XCTAssertEqual(result.exitCode, 0, "\(profile.displayName)\n\(result.stderrText)")
+            let metadata = try await FFprobeRunner().loadMetadata(ffprobePath: tools.ffprobe, inputURL: output)
+            XCTAssertNoThrow(try CompressionOutputValidator.verify(metadata: metadata, request: request), profile.displayName)
+            XCTAssertTrue(profile.expectedVideoCodecs.contains(metadata.videoCodec ?? ""), profile.displayName)
+            XCTAssertTrue(profile.expectedAudioCodecs.contains(metadata.audioCodec ?? ""), profile.displayName)
+            XCTAssertEqual(output.pathExtension, profile.fileExtension)
+        }
+    }
+
     func testOptionalFFmpegSyntheticRotateFlipTransforms() async throws {
         let ffmpegPath = "/opt/homebrew/bin/ffmpeg"
         let ffprobePath = "/opt/homebrew/bin/ffprobe"
@@ -364,6 +413,80 @@ final class FFmpegIntegrationTests: XCTestCase {
         }
     }
 
+    func testOptionalFFmpegSyntheticCropExports() async throws {
+        let tools = try MediaFixtures.requireTools()
+        try await MediaFixtures.ensureGenerated()
+        let encoders = try await FFmpegRunner().encoders(ffmpegPath: tools.ffmpeg)
+        guard encoders.contains("libx264") else {
+            throw XCTSkip("FFmpeg does not include libx264")
+        }
+
+        let standard = try MediaFixtures.fixture(id: "standardLandscape")
+        let portrait = try MediaFixtures.fixture(id: "portraitVideo")
+        let rotation = try MediaFixtures.fixture(id: "rotationMetadata")
+        let silent = try MediaFixtures.fixture(id: "silentVideo")
+
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let service = VideoEditingService()
+
+        try await runCrop(
+            service: service,
+            ffmpegPath: tools.ffmpeg,
+            ffprobePath: tools.ffprobe,
+            request: cropRequest(
+                input: MediaFixtures.url(for: standard),
+                fixture: standard,
+                output: directory.appendingPathComponent("landscape-square.mp4"),
+                configuration: cropAspect(.square, position: .center)
+            ),
+            expectedDimensions: VideoDimensions(width: 180, height: 180),
+            expectedAudio: true
+        )
+
+        try await runCrop(
+            service: service,
+            ffmpegPath: tools.ffmpeg,
+            ffprobePath: tools.ffprobe,
+            request: cropRequest(
+                input: MediaFixtures.url(for: portrait),
+                fixture: portrait,
+                output: directory.appendingPathComponent("portrait-square.mp4"),
+                configuration: cropAspect(.square, position: .top)
+            ),
+            expectedDimensions: VideoDimensions(width: 180, height: 180),
+            expectedAudio: true
+        )
+
+        try await runCrop(
+            service: service,
+            ffmpegPath: tools.ffmpeg,
+            ffprobePath: tools.ffprobe,
+            request: cropRequest(
+                input: MediaFixtures.url(for: rotation),
+                fixture: rotation,
+                output: directory.appendingPathComponent("rotation-metadata-square.mp4"),
+                configuration: cropAspect(.square, position: .center)
+            ),
+            expectedDimensions: VideoDimensions(width: 180, height: 180),
+            expectedAudio: true
+        )
+
+        try await runCrop(
+            service: service,
+            ffmpegPath: tools.ffmpeg,
+            ffprobePath: tools.ffprobe,
+            request: cropRequest(
+                input: MediaFixtures.url(for: silent),
+                fixture: silent,
+                output: directory.appendingPathComponent("silent-square.mp4"),
+                configuration: cropAspect(.square, position: .center)
+            ),
+            expectedDimensions: VideoDimensions(width: 120, height: 120),
+            expectedAudio: false
+        )
+    }
+
     func testOptionalFFmpegSyntheticCombinedEditPlans() async throws {
         let ffmpegPath = "/opt/homebrew/bin/ffmpeg"
         let ffprobePath = "/opt/homebrew/bin/ffprobe"
@@ -462,6 +585,16 @@ final class FFmpegIntegrationTests: XCTestCase {
             hasAudioStream: true,
             trim: TrimConfiguration(mode: .trimBoth, removeStartSeconds: 0.7, removeEndSeconds: 0.8, executionMode: .fast),
             transform: VideoTransformConfiguration(rotation: .counterclockwise90, flipHorizontal: true, flipVertical: false),
+            crop: CropConfiguration(
+                mode: .aspectRatio,
+                aspectRatioPreset: .square,
+                customAspectRatio: nil,
+                position: .center,
+                customX: nil,
+                customY: nil,
+                customWidth: nil,
+                customHeight: nil
+            ),
             resize: ResizeConfiguration(resolution: .p480, customHeight: nil),
             compression: nil,
             audioMode: .remove
@@ -471,7 +604,7 @@ final class FFmpegIntegrationTests: XCTestCase {
         metadata = try await FFprobeRunner().loadMetadata(ffprobePath: ffprobePath, inputURL: planCOutput)
         XCTAssertEqual(metadata.videoCodec, "h264")
         XCTAssertNil(metadata.audioCodec)
-        XCTAssertEqual(metadata.width, 270)
+        XCTAssertEqual(metadata.width, 480)
         XCTAssertEqual(metadata.height, 480)
 
         let files = try FileManager.default.contentsOfDirectory(atPath: directory.path)
@@ -747,6 +880,58 @@ final class FFmpegIntegrationTests: XCTestCase {
         XCTAssertEqual(metadata.audioCodec != nil, expectedAudio)
         XCTAssertTrue(metadata.rotationDegrees == nil || metadata.rotationDegrees == 0)
         XCTAssertNoThrow(try VideoTransformOutputValidator.verify(metadata: metadata, request: request))
+    }
+
+    private func cropRequest(
+        input: URL,
+        fixture: MediaFixture,
+        output: URL,
+        configuration: CropConfiguration
+    ) -> CropRequest {
+        CropRequest(
+            inputURL: input,
+            outputURL: output,
+            sourceDuration: fixture.durationSeconds,
+            sourceDimensions: VideoDimensions(width: fixture.codedWidth, height: fixture.codedHeight),
+            sourceRotationDegrees: fixture.rotationDegrees,
+            hasVideoStream: true,
+            hasAudioStream: fixture.audioCodec != nil,
+            configuration: configuration
+        )
+    }
+
+    private func cropAspect(_ preset: CropAspectRatioPreset, position: CropPositionPreset) -> CropConfiguration {
+        CropConfiguration(
+            mode: .aspectRatio,
+            aspectRatioPreset: preset,
+            customAspectRatio: nil,
+            position: position,
+            customX: nil,
+            customY: nil,
+            customWidth: nil,
+            customHeight: nil
+        )
+    }
+
+    private func runCrop(
+        service: VideoEditingService,
+        ffmpegPath: String,
+        ffprobePath: String,
+        request: CropRequest,
+        expectedDimensions: VideoDimensions,
+        expectedAudio: Bool
+    ) async throws {
+        let command = try service.cropCommand(ffmpegPath: ffmpegPath, request: request)
+        XCTAssertEqual(command.arguments.commandValue(after: "-vf"), try request.filterChain())
+        let result = try await ProcessRunner().run(executablePath: command.executablePath, arguments: command.arguments)
+        XCTAssertEqual(result.exitCode, 0, result.stderrText)
+        let metadata = try await FFprobeRunner().loadMetadata(ffprobePath: ffprobePath, inputURL: request.outputURL)
+        XCTAssertEqual(metadata.videoCodec, "h264")
+        XCTAssertEqual(metadata.width, expectedDimensions.width)
+        XCTAssertEqual(metadata.height, expectedDimensions.height)
+        XCTAssertEqual(metadata.audioCodec != nil, expectedAudio)
+        XCTAssertTrue(metadata.rotationDegrees == nil || metadata.rotationDegrees == 0)
+        XCTAssertNoThrow(try CropOutputValidator.verify(metadata: metadata, request: request))
     }
 
     private func runEditPlan(

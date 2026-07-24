@@ -230,6 +230,10 @@ public protocol VideoTransformOutputVerifying: Sendable {
     func verify(request: VideoTransformRequest, outputURL: URL) async throws
 }
 
+public protocol CropOutputVerifying: Sendable {
+    func verify(request: CropRequest, outputURL: URL) async throws
+}
+
 public protocol VideoEditPlanOutputVerifying: Sendable {
     func verify(plan: VideoEditPlan, outputURL: URL) async throws
 }
@@ -357,10 +361,9 @@ public final class VideoEditingService: @unchecked Sendable {
         do {
             let command = try command(ffmpegPath: ffmpegPath, request: request)
             try preflightValidator.validate(ffmpegPath: ffmpegPath, request: request)
-            if request.trimExecutionMode == .accurate {
-                guard try await encoderChecker.supportsLibx264(ffmpegPath: ffmpegPath) else {
-                    throw CompressionValidationError.missingLibx264
-                }
+            try validateOutputExtension(outputURL: request.outputURL, profile: request.exportProfile)
+            if request.effectiveTrimExecutionMode == .accurate {
+                try await ensureExportProfile(ffmpegPath: ffmpegPath, profile: request.exportProfile)
             }
             let outcome = try await execute(
                 command: command,
@@ -374,12 +377,12 @@ public final class VideoEditingService: @unchecked Sendable {
             await markVerifying(state: state)
             try await outputVerifier?.verify(request: request, outputURL: request.outputURL)
             await MainActor.run {
-                let completedStatus = request.trimExecutionMode == .accurate ? "Accurate trim complete" : "Fast trim complete"
+                let completedStatus = request.effectiveTrimExecutionMode == .accurate ? "Accurate trim complete" : "Fast trim complete"
                 state.phase = .completed(outputURL: request.outputURL, byteCount: byteCount)
                 state.statusText = completedStatus
                 state.outputURL = request.outputURL
                 state.message = "Saved: \(request.outputURL.path)"
-                if request.trimExecutionMode == .fast {
+                if request.effectiveTrimExecutionMode == .fast {
                     state.message = (state.message ?? "Saved: \(request.outputURL.path)") + "\n\nThe cut may align to nearby keyframes."
                 }
             }
@@ -463,11 +466,12 @@ public final class VideoEditingService: @unchecked Sendable {
             _ = try request.qualitySettings()
             _ = try request.outputDimensions()
             try preflightValidator.validate(ffmpegPath: ffmpegPath, inputURL: request.inputURL, outputURL: request.outputURL)
+            try validateOutputExtension(outputURL: request.outputURL, profile: request.exportProfile)
 
             await MainActor.run {
                 state.statusText = "Checking encoder..."
             }
-            try await ensureLibx264(ffmpegPath: ffmpegPath)
+            try await ensureExportProfile(ffmpegPath: ffmpegPath, profile: request.exportProfile)
 
             let command = try compressionCommand(ffmpegPath: ffmpegPath, request: request)
             let outcome = try await execute(
@@ -526,13 +530,12 @@ public final class VideoEditingService: @unchecked Sendable {
             _ = try request.filterChain()
             _ = try request.outputDimensions()
             try preflightValidator.validate(ffmpegPath: ffmpegPath, inputURL: request.inputURL, outputURL: request.outputURL)
+            try validateOutputExtension(outputURL: request.outputURL, profile: request.exportProfile)
 
             await MainActor.run {
                 state.statusText = "Checking encoder..."
             }
-            guard try await encoderChecker.supportsLibx264(ffmpegPath: ffmpegPath) else {
-                throw VideoTransformValidationError.missingLibx264
-            }
+            try await ensureExportProfile(ffmpegPath: ffmpegPath, profile: request.exportProfile)
 
             let command = try transformCommand(ffmpegPath: ffmpegPath, request: request)
             let outcome = try await execute(
@@ -554,6 +557,63 @@ public final class VideoEditingService: @unchecked Sendable {
                 state.statusText = "Transformation complete"
                 state.outputURL = request.outputURL
                 state.message = EditingSuccessMessageFormatter.transformSuccessMessage(request: request, inputSize: inputSize, outputSize: outputSize)
+            }
+        } catch ProcessExecutionError.launchFailed(let message) {
+            await fail(state: state, error: VideoEditingError.launchFailed(message))
+        } catch ProcessExecutionError.cancelled {
+            await markCancelled(state: state, outputURL: request.outputURL)
+        } catch {
+            await fail(state: state, error: error)
+        }
+        return true
+    }
+
+    @discardableResult
+    public func runCrop(
+        ffmpegPath: String,
+        ffprobePath: String,
+        request: CropRequest,
+        state: EditingOperationState,
+        verifier: (any CropOutputVerifying)? = nil
+    ) async -> Bool {
+        guard beginOperation() else {
+            return false
+        }
+        defer { endOperation() }
+
+        await MainActor.run {
+            state.phase = .starting
+            state.statusText = "Preparing crop export..."
+            state.message = nil
+            state.outputURL = nil
+            state.diagnostics = EditingDiagnostics(ffmpegPath: ffmpegPath, startedAt: Date(), lastActivityAt: Date())
+        }
+
+        do {
+            guard request.hasVideoStream else { throw CropValidationError.missingVideoStream }
+            try request.validate()
+            try preflightValidator.validate(ffmpegPath: ffmpegPath, inputURL: request.inputURL, outputURL: request.outputURL)
+            try validateOutputExtension(outputURL: request.outputURL, profile: request.exportProfile)
+            try await ensureExportProfile(ffmpegPath: ffmpegPath, profile: request.exportProfile)
+            let inputSize = fileSystem.fileSize(at: request.inputURL)
+            let command = try cropCommand(ffmpegPath: ffmpegPath, request: request)
+            let outcome = try await execute(
+                command: command,
+                totalDuration: request.sourceDuration,
+                outputURL: request.outputURL,
+                state: state,
+                runningStatus: "Cropping video..."
+            )
+            guard case .completed(let outputSize) = outcome else { return true }
+
+            let outputVerifier = verifier ?? FFprobeCropOutputVerifier(ffprobePath: ffprobePath)
+            await markVerifying(state: state)
+            try await outputVerifier.verify(request: request, outputURL: request.outputURL)
+            await MainActor.run {
+                state.phase = .completed(outputURL: request.outputURL, byteCount: outputSize)
+                state.statusText = "Crop export complete"
+                state.outputURL = request.outputURL
+                state.message = EditingSuccessMessageFormatter.cropSuccessMessage(request: request, inputSize: inputSize, outputSize: outputSize)
             }
         } catch ProcessExecutionError.launchFailed(let message) {
             await fail(state: state, error: VideoEditingError.launchFailed(message))
@@ -589,14 +649,13 @@ public final class VideoEditingService: @unchecked Sendable {
         do {
             try plan.validate()
             try preflightValidator.validate(ffmpegPath: ffmpegPath, inputURL: plan.inputURL, outputURL: plan.outputURL)
+            try validateOutputExtension(outputURL: plan.outputURL, profile: plan.exportProfile)
             let strategy = try plan.executionStrategy()
             if strategy == .reencode {
                 await MainActor.run {
                     state.statusText = "Checking encoder..."
                 }
-                guard try await encoderChecker.supportsLibx264(ffmpegPath: ffmpegPath) else {
-                    throw CompressionValidationError.missingLibx264
-                }
+                try await ensureExportProfile(ffmpegPath: ffmpegPath, profile: plan.exportProfile)
             }
 
             let command = try editPlanCommand(ffmpegPath: ffmpegPath, plan: plan)
@@ -654,13 +713,12 @@ public final class VideoEditingService: @unchecked Sendable {
         do {
             try request.validateForExport()
             try preflightValidator.validate(ffmpegPath: ffmpegPath, inputURL: request.inputURL, outputURL: request.outputURL)
+            try validateOutputExtension(outputURL: request.outputURL, profile: request.exportProfile)
 
             await MainActor.run {
                 state.statusText = "Checking encoder..."
             }
-            guard try await encoderChecker.supportsLibx264(ffmpegPath: ffmpegPath) else {
-                throw VideoSpeedValidationError.missingLibx264
-            }
+            try await ensureExportProfile(ffmpegPath: ffmpegPath, profile: request.exportProfile)
 
             let command = try speedCommand(ffmpegPath: ffmpegPath, request: request)
             let outcome = try await execute(
@@ -906,6 +964,20 @@ public final class VideoEditingService: @unchecked Sendable {
     private func ensureLibx264(ffmpegPath: String) async throws {
         guard try await encoderChecker.supportsLibx264(ffmpegPath: ffmpegPath) else {
             throw CompressionValidationError.missingLibx264
+        }
+    }
+
+    private func ensureExportProfile(ffmpegPath: String, profile: ExportProfile) async throws {
+        let support = try await encoderChecker.capabilities(ffmpegPath: ffmpegPath).support(for: profile)
+        guard support.isSupported else {
+            throw ExportProfileValidationError.missingEncoder(profile: profile, encoder: support.missingEncoders.first ?? profile.requiredVideoEncoder)
+        }
+    }
+
+    private func validateOutputExtension(outputURL: URL, profile: ExportProfile) throws {
+        let actual = outputURL.pathExtension.lowercased()
+        guard actual == profile.fileExtension else {
+            throw ExportProfileValidationError.wrongExtension(expected: profile.fileExtension, actual: actual)
         }
     }
 

@@ -6,6 +6,8 @@ struct RemoveAudioEditingSection: View {
     let inputURL: URL?
     let duration: TimeInterval
     let metadata: VideoMetadata?
+    let exportProfileCapabilities: ExportProfileCapabilities?
+    let exportProfileCapabilityMessage: String?
     @ObservedObject var operationState: EditingOperationState
     @Binding var validationMessage: String?
     let onRemoveAudio: (RemoveAudioRequest) -> Void
